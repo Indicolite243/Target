@@ -1,0 +1,6 @@
+ALTER TABLE sys_user
+    MODIFY COLUMN username VARCHAR(255) NOT NULL,
+    MODIFY COLUMN display_name VARCHAR(255) NOT NULL;
+
+ALTER TABLE account
+    MODIFY COLUMN account_name VARCHAR(512) NOT NULL;
