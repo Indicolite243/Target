@@ -120,6 +120,40 @@ npm run dev
 
 也可直接运行 `D:\Target\start-frontend.ps1`。三个服务启动后，可执行 `D:\Target\check-services.ps1` 检查状态。
 
+### 7. 一键启动前端和 Python（Windows）
+
+如果 Spring Boot 已在 IDEA 中运行，可以直接双击：
+
+```text
+D:\Target\start-services.bat
+```
+
+该脚本只负责启动前端和 Python 量化服务：
+
+- Python 量化服务监听 `127.0.0.1:8000`；
+- Vite 前端监听 `127.0.0.1:5173`；
+- 已经监听的端口会自动跳过，不会重复启动进程；
+- 启动完成后会自动打开 `http://127.0.0.1:5173/login`；
+- 不会启动、停止或重启 IDEA 中的 Spring Boot `8080` 服务。
+
+也可以在 PowerShell 中执行：
+
+```powershell
+cd D:\Target
+.\start-services.ps1
+```
+
+首次使用前请确认已经执行过 `frontend\npm install`，并且 Python 虚拟环境和 `xtquant` 依赖已经安装。QMT 客户端仍需单独启动、登录资金账号并进入“极简模式”；一键脚本不会替代 QMT 客户端登录。
+
+如果服务启动失败，先运行：
+
+```powershell
+cd D:\Target
+.\check-services.ps1
+```
+
+再根据 8000、8080、5173 对应窗口的错误信息排查。浏览器已经打开但页面没有数据时，确认 Spring Boot 8080 和 QMT 客户端均已正常运行。
+
 ## 测试账户
 
 已在 MySQL 中创建并验证：
