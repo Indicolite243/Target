@@ -154,6 +154,33 @@ cd D:\Target
 
 再根据 8000、8080、5173 对应窗口的错误信息排查。浏览器已经打开但页面没有数据时，确认 Spring Boot 8080 和 QMT 客户端均已正常运行。
 
+### 8. IDEA 实时日志启动方式
+
+项目还提供了 IDEA 运行配置，用于让 Python 和 Vite 的实时日志直接显示在 IDEA 的 Run 窗口：
+
+```text
+Python Quant Service (Console)
+Vite Frontend (Console)
+Stock Vision Services
+```
+
+选择 `Stock Vision Services` 会同时启动前两个配置。它只负责 8000 和 5173，不会自动启动 8080；Spring Boot 仍需单独运行 `StockManagerApplication`。如果配置第一次显示为不可用或打叉，请重新打开 `D:\Target` 项目，让 IDEA 重新加载 `.idea\runConfigurations`。
+
+IDEA 配置使用 `run-quant-console.bat` 和 `run-frontend-console.bat` 把现有 PowerShell 启动脚本接入 IDEA 控制台。前端脚本已关闭 Vite ANSI 彩色控制符，因此日志不会显示为 `[32m`、`[22m` 等乱码样式。
+
+不要同时运行 `start-services.bat` 和 IDEA 的 `Stock Vision Services`，否则两个启动入口会竞争 8000 或 5173 端口。停止时应在 IDEA 中停止对应运行项；停止控制台不会关闭 QMT 客户端。
+
+### 9. QMT 账号配置来源
+
+IDEA 运行配置、前端代码和批处理脚本都不写死 QMT 资金账号。Python 服务从根目录 `.env` 读取：
+
+```properties
+QUANT_QMT_ACCOUNT_ID=你的QMT资金账号
+QUANT_QMT_PATH=D:/你的QMT安装目录/userdata_mini
+```
+
+`.env` 已被 Git 忽略，不会提交到仓库；请以 `.env.example` 为模板创建本机配置。网页登录账号（例如 `test`）与 QMT 资金账号是两套账号，切换 QMT 账户时只需修改 `.env` 后重新启动 Python 服务。
+
 ## 测试账户
 
 已在 MySQL 中创建并验证：
