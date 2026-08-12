@@ -1,0 +1,7 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Stock Vision Services" type="CompoundRunConfigurationType">
+    <toRun name="Python Quant Service (Console)" type="BatchConfigurationType" />
+    <toRun name="Vite Frontend (Console)" type="BatchConfigurationType" />
+    <method v="2" />
+  </configuration>
+</component>
