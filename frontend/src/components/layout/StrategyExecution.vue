@@ -34,9 +34,10 @@
                 v-if="progressState === 'running'"
                 type="button"
                 class="execution-progress-cancel"
+                :disabled="cancelling"
                 @click="cancelExecution"
               >
-                取消执行
+                {{ cancelling ? '正在取消...' : '取消执行' }}
               </button>
             </div>
             <div class="execution-progress-track">
@@ -221,10 +222,12 @@ const progressVisible = ref(false)
 const progressValue = ref(0)
 const progressLabel = ref('')
 const progressState = ref('running')
+const cancelling = ref(false)
 let progressTimer = null
 let hideTimer = null
 let progressStageTimer = null
 let activeRequestController = null
+let activeTaskId = ''
 
 const detectedEngine = computed(() => {
   if (!selectedStrategyText.value) return 'unknown'
@@ -327,15 +330,41 @@ function finishExecutionProgress(state, label) {
   }, state === 'success' ? 700 : 1000)
 }
 
-function cancelExecution() {
-  if (activeRequestController) {
-    activeRequestController.abort()
-    activeRequestController = null
+async function cancelExecution() {
+  if (cancelling.value) return
+  cancelling.value = true
+  try {
+    if (!activeTaskId) {
+      activeRequestController?.abort()
+      finishExecutionProgress('error', '已停止本页等待')
+      ElMessage.info('已停止本页等待；若请求已受理，任务可能仍在后台执行')
+      return
+    }
+
+    try {
+      await httpClient.post(`/quant-tasks/${activeTaskId}/cancel`, {}, { timeout: 8000 })
+      activeRequestController?.abort()
+      activeTaskId = ''
+      finishExecutionProgress('error', '已取消排队中的回测任务')
+      ElMessage.success('已取消排队中的回测任务')
+    } catch (error) {
+      if (error.status === 409) {
+        // The backend intentionally allows cancellation only before execution.
+        // Do not claim a running calculation was cancelled; detach this page
+        // from polling and leave its result available in the task query API.
+        activeRequestController?.abort()
+        activeTaskId = ''
+        finishExecutionProgress('error', '任务已开始执行，已停止本页等待')
+        ElMessage.info('任务已开始执行，后台会继续运行，可稍后查看结果')
+        return
+      }
+      throw error
+    }
+  } catch (error) {
+    ElMessage.error(error?.message || '取消请求失败，任务可能仍在后台执行')
+  } finally {
+    cancelling.value = false
   }
-  finishExecutionProgress('error', '已取消本次回测请求')
-  isExecuting.value = false
-  window.dispatchEvent(new CustomEvent('strategy-execution-failed'))
-  ElMessage.warning('已取消当前回测请求')
 }
 
 function handleStrategyChange() {}
@@ -418,11 +447,17 @@ async function confirmUpload() {
     activeRequestController = new AbortController()
     const response = await httpClient.post('/backtests/run', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 360000,
+      timeout: 20000,
       signal: activeRequestController.signal
     })
 
-    const result = response.data?.data || {}
+    const task = response.data?.data || {}
+    if (!task.id) {
+      throw taskFailure('回测任务受理失败，未返回任务ID')
+    }
+    activeTaskId = String(task.id)
+    progressLabel.value = '任务已受理，正在后台执行回测...'
+    const result = await waitForBacktestTask(task.id, activeRequestController.signal)
     if (result.status !== 'success') {
       finishExecutionProgress('error')
       window.dispatchEvent(new CustomEvent('strategy-execution-failed'))
@@ -481,10 +516,50 @@ async function confirmUpload() {
 
     finishExecutionProgress('error')
     window.dispatchEvent(new CustomEvent('strategy-execution-failed'))
-    ElMessage.error(payload?.message || '无法连接到后端服务，请确认服务已启动')
+    ElMessage.error(payload?.message || error.message || '无法连接到后端服务，请确认服务已启动')
   } finally {
     isExecuting.value = false
+    activeRequestController = null
+    activeTaskId = ''
   }
+}
+
+async function waitForBacktestTask(taskId, signal) {
+  const deadline = Date.now() + 330000
+  while (Date.now() < deadline) {
+    await delay(1000)
+    if (signal?.aborted) {
+      const error = taskFailure('已停止等待回测任务')
+      error.code = 'ERR_CANCELED'
+      throw error
+    }
+    const response = await httpClient.get(`/quant-tasks/${taskId}`, { signal, timeout: 8000 })
+    const task = response.data?.data || {}
+    if (task.progress !== undefined) {
+      progressValue.value = Math.max(progressValue.value, Math.min(95, Number(task.progress) || 0))
+    }
+    if (task.stage) {
+      progressLabel.value = task.stage
+    }
+    if (task.status === 'SUCCEEDED') {
+      const resultResponse = await httpClient.get(`/quant-tasks/${taskId}/result`, { signal, timeout: 12000 })
+      return resultResponse.data?.data || {}
+    }
+    if (task.status === 'FAILED' || task.status === 'CANCELLED') {
+      throw taskFailure(task.errorMessage || '回测任务执行失败')
+    }
+  }
+  throw taskFailure('回测任务等待超时，可稍后通过任务ID查询结果')
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function taskFailure(message) {
+  const error = new Error(message)
+  error.code = 'BACKTEST_TASK_FAILED'
+  return error
 }
 
 onBeforeUnmount(() => {
@@ -615,6 +690,12 @@ onBeforeUnmount(() => {
   transform: translateY(-1px);
   border-color: rgba(255, 145, 157, 0.7);
   box-shadow: 0 0 18px rgba(255, 106, 125, 0.26);
+}
+
+.execution-progress-cancel:disabled {
+  cursor: wait;
+  opacity: 0.62;
+  transform: none;
 }
 
 .execution-progress-track {

@@ -1,11 +1,15 @@
 <template>
   <div class="module-card">
     <div
-      class="menu-item"
+      class="import-entrust-button"
       @click="openStrategyFile"
+      role="button"
+      tabindex="0"
+      @keydown.enter="openStrategyFile"
+      @keydown.space.prevent="openStrategyFile"
     >
-      <div class="menu-icon region-icon"></div>
-      <span>选择策略Excel文件</span>
+      <span class="import-entrust-button__icon" aria-hidden="true">⇩</span>
+      <span>读取委托 Excel</span>
     </div>
     <input
       type="file"
@@ -304,6 +308,47 @@ const clearTable = async () => {
 
 .module-card {
   width: 100%;
+}
+
+.import-entrust-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: fit-content;
+  min-height: 32px;
+  margin: 0 0 12px;
+  padding: 0 12px;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  background: #30485f;
+  border: 1px solid #3e5a73;
+  border-radius: 4px;
+  transition: background-color 0.16s ease, border-color 0.16s ease;
+}
+
+.import-entrust-button:hover,
+.import-entrust-button:focus-visible {
+  outline: none;
+  background: #3a5873;
+  border-color: #5d7f9c;
+}
+
+.import-entrust-button:active {
+  background: #293f53;
+}
+
+.import-entrust-button__icon {
+  display: grid;
+  width: 14px;
+  height: 14px;
+  place-items: center;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1;
 }
 
 .table-container, .table-stock {

@@ -17,9 +17,11 @@ import java.util.List;
 @Component
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
     private final JwtService jwtService;
+    private final JwtTokenBlacklist tokenBlacklist;
 
-    public JwtAuthenticationFilter(JwtService jwtService) {
+    public JwtAuthenticationFilter(JwtService jwtService, JwtTokenBlacklist tokenBlacklist) {
         this.jwtService = jwtService;
+        this.tokenBlacklist = tokenBlacklist;
     }
 
     @Override
@@ -29,6 +31,11 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         if (header != null && header.startsWith("Bearer ")) {
             try {
                 Claims claims = jwtService.parse(header.substring(7));
+                if (tokenBlacklist.isRevoked(claims)) {
+                    SecurityContextHolder.clearContext();
+                    filterChain.doFilter(request, response);
+                    return;
+                }
                 String role = claims.get("role", String.class);
                 var authentication = new UsernamePasswordAuthenticationToken(
                         claims.getSubject(), null, List.of(new SimpleGrantedAuthority("ROLE_" + role)));

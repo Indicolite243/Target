@@ -5,8 +5,8 @@
         <div class="control-label inline-label">数据源</div>
         <div class="control-actions unified-actions">
           <el-select v-model="pendingSource" size="small" class="control-select">
-            <el-option label="QMT实时" value="qmt" />
-            <el-option label="MongoDB缓存" value="mongodb" />
+            <el-option label="Redis实时快照" value="qmt" />
+            <el-option label="MySQL历史快照" value="mysql" />
           </el-select>
           <el-button size="small" type="primary" @click="applySource">确认</el-button>
           <el-date-picker
@@ -244,8 +244,8 @@ export default {
     return {
       loading: false,
       errorMessage: '',
-      source: 'qmt',
-      pendingSource: 'qmt',
+      source: 'mysql',
+      pendingSource: 'mysql',
       dateRange: range,
       pendingDateRange: [...range],
       attributionRows: [],
@@ -387,8 +387,8 @@ export default {
     resolveSourceLabel(source) {
       if (source === 'qmt_live') return 'QMT实时'
       if (source === 'qmt_history') return 'QMT历史行情'
-      if (source === 'mongodb_cache') return 'MongoDB缓存'
-      if (source === 'mongodb_history') return 'MongoDB历史快照'
+      if (source === 'mysql_current') return 'MySQL最近同步快照'
+      if (source === 'mysql_account_snapshots') return 'MySQL历史快照'
       return '--'
     },
     valueClass(value) {

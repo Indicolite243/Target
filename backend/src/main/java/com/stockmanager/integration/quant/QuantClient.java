@@ -5,13 +5,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
-import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.MultipartBodyBuilder;
 import org.springframework.web.client.RestClient;
-import org.springframework.web.multipart.MultipartFile;
-
-import java.io.IOException;
+import org.springframework.web.client.RestClientResponseException;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -19,25 +18,37 @@ import java.util.UUID;
 @Component
 public class QuantClient {
     private final RestClient restClient;
+    private final RestClient realtimeRestClient;
     private final String internalToken;
 
     public QuantClient(RestClient.Builder builder,
                        @Value("${app.quant-service.base-url}") String baseUrl,
-                       @Value("${app.quant-service.internal-token}") String internalToken) {
+                       @Value("${app.quant-service.internal-token}") String internalToken,
+                       @Value("${app.quant-service.connect-timeout-ms:500}") int connectTimeoutMs,
+                       @Value("${app.quant-service.realtime-read-timeout-ms:2000}") int realtimeReadTimeoutMs) {
+        SimpleClientHttpRequestFactory realtimeRequestFactory = new SimpleClientHttpRequestFactory();
+        realtimeRequestFactory.setConnectTimeout(connectTimeoutMs);
+        realtimeRequestFactory.setReadTimeout(realtimeReadTimeoutMs);
+        this.realtimeRestClient = builder.requestFactory(realtimeRequestFactory).baseUrl(baseUrl).build();
+
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(1_000);
+        requestFactory.setConnectTimeout(connectTimeoutMs);
         requestFactory.setReadTimeout(360_000);
         this.restClient = builder.requestFactory(requestFactory).baseUrl(baseUrl).build();
         this.internalToken = internalToken;
     }
 
     public Map<String, Object> syncAccount(Map<String, Object> request, String traceId) {
-        return post("/accounts/sync", request, traceId, 503601, "账户同步服务暂时不可用");
+        return post(realtimeRestClient, "/accounts/sync", request, traceId, 503601, "账户同步服务暂时不可用");
+    }
+
+    public Map<String, Object> livePortfolio(Map<String, Object> request, String traceId) {
+        return post(realtimeRestClient, "/accounts/live", request, traceId, 503601, "QMT实时组合服务暂时不可用");
     }
 
     public Map<String, Object> health(String traceId) {
         try {
-            Map<?, ?> response = restClient.get().uri("/health")
+            Map<?, ?> response = realtimeRestClient.get().uri("/health")
                     .header("X-Trace-Id", traceId)
                     .retrieve()
                     .body(Map.class);
@@ -59,28 +70,30 @@ public class QuantClient {
     }
 
     public Map<String, Object> quotes(Map<String, Object> request, String traceId) {
-        return post("/market/quotes", request, traceId, 503201, "行情服务暂时不可用");
+        return post(realtimeRestClient, "/market/quotes", request, traceId, 503201, "行情服务暂时不可用");
     }
 
     public Map<String, Object> submitOrder(Map<String, Object> request, String traceId) {
-        return post("/orders/submit", request, traceId, 503301, "交易服务暂时不可用");
+        return post(realtimeRestClient, "/orders/submit", request, traceId, 503301, "交易服务暂时不可用",
+                422301, "委托被QMT拒绝");
     }
 
     public Map<String, Object> calculateRisk(Map<String, Object> request, String traceId) {
-        return post("/risk/calculate", request, traceId, 503401, "风险计算服务暂时不可用");
+        return post(restClient, "/risk/calculate", request, traceId, 503401, "风险计算服务暂时不可用");
     }
 
     public Map<String, Object> portfolioHistory(Map<String, Object> request, String traceId) {
-        return post("/analysis/portfolio-history", request, traceId, 503402, "QMT历史行情服务暂时不可用");
+        return post(restClient, "/analysis/portfolio-history", request, traceId, 503402, "QMT历史行情服务暂时不可用");
     }
 
     public Map<String, Object> cancelOrder(Map<String, Object> request, String traceId) {
-        return post("/orders/cancel", request, traceId, 503301, "撤单服务暂时不可用");
+        return post(realtimeRestClient, "/orders/cancel", request, traceId, 503301, "撤单服务暂时不可用",
+                422302, "撤单请求被QMT拒绝");
     }
 
     public Map<String, Object> queryOrders(String traceId) {
         try {
-            Map<?, ?> response = restClient.get().uri("/orders/query")
+            Map<?, ?> response = realtimeRestClient.get().uri("/orders/query")
                     .header("X-Internal-Token", internalToken)
                     .header("X-Trace-Id", traceId)
                     .header("X-Request-Id", UUID.randomUUID().toString())
@@ -102,19 +115,20 @@ public class QuantClient {
         }
     }
 
-    public Map<String, Object> runBacktest(MultipartFile strategyFile, List<MultipartFile> marketFiles,
+    /** Uses task-owned files, never request-scoped MultipartFile instances. */
+    public Map<String, Object> runBacktest(Path strategyPath, List<Path> marketPaths,
                                            String startDate, String endDate, String engineType,
                                            String benchmarkSymbol, boolean bearProtection, String traceId) {
         try {
             MultipartBodyBuilder body = new MultipartBodyBuilder();
-            body.part("file", namedResource(strategyFile)).filename(strategyFile.getOriginalFilename());
+            body.part("file", new FileSystemResource(strategyPath)).filename(strategyPath.getFileName().toString());
             body.part("start_date", startDate);
             body.part("end_date", endDate);
             body.part("engine_type", engineType == null ? "auto" : engineType);
             body.part("benchmark_symbol", benchmarkSymbol == null ? "" : benchmarkSymbol);
             body.part("enable_bear_protection", String.valueOf(bearProtection));
-            for (MultipartFile marketFile : marketFiles) {
-                body.part("market_files", namedResource(marketFile)).filename(marketFile.getOriginalFilename());
+            for (Path marketPath : marketPaths) {
+                body.part("market_files", new FileSystemResource(marketPath)).filename(marketPath.getFileName().toString());
             }
             Map<?, ?> response = restClient.post().uri("/backtests/run")
                     .header("X-Internal-Token", internalToken)
@@ -141,17 +155,15 @@ public class QuantClient {
         }
     }
 
-    private ByteArrayResource namedResource(MultipartFile file) throws IOException {
-        String filename = file.getOriginalFilename() == null ? "upload.bin" : file.getOriginalFilename();
-        return new ByteArrayResource(file.getBytes()) {
-            @Override public String getFilename() { return filename; }
-        };
+    private Map<String, Object> post(RestClient client, String path, Map<String, Object> request, String traceId,
+                                     int errorCode, String errorMessage) {
+        return post(client, path, request, traceId, errorCode, errorMessage, errorCode, errorMessage);
     }
 
-    private Map<String, Object> post(String path, Map<String, Object> request, String traceId,
-                                     int errorCode, String errorMessage) {
+    private Map<String, Object> post(RestClient client, String path, Map<String, Object> request, String traceId,
+                                     int errorCode, String errorMessage, int rejectedCode, String rejectedMessage) {
         try {
-            Map<?, ?> response = restClient.post().uri(path)
+            Map<?, ?> response = client.post().uri(path)
                     .header("X-Internal-Token", internalToken)
                     .header("X-Trace-Id", traceId)
                     .header("X-Request-Id", UUID.randomUUID().toString())
@@ -171,6 +183,11 @@ public class QuantClient {
             return result;
         } catch (BusinessException ex) {
             throw ex;
+        } catch (RestClientResponseException ex) {
+            if (ex.getStatusCode().is4xxClientError()) {
+                throw new BusinessException(rejectedCode, rejectedMessage, HttpStatus.UNPROCESSABLE_ENTITY);
+            }
+            throw new BusinessException(errorCode, errorMessage, HttpStatus.SERVICE_UNAVAILABLE);
         } catch (Exception ex) {
             throw new BusinessException(errorCode, errorMessage, HttpStatus.SERVICE_UNAVAILABLE);
         }

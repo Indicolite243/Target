@@ -23,10 +23,6 @@
           <div class="menu-icon strategy-icon"></div>
             <span>执行策略</span>
           </div>
-          <div class="menu-item">
-            <div class="menu-icon time-icon"></div>
-            <span>ETF策略</span>
-          </div>
 <!-- 左侧导航栏-当前账户信息 -->
            <div
             class="menu-item"
@@ -39,48 +35,48 @@
           </div>
 <!-- 竖向表格 -->
           <div class="table-container">
-            <div class="vertical-table">
+            <div class="vertical-table account-table">
               <div class="tableRowClassName({ rowIndex: 0 })">
-                <div class="menu-item" :style="headerStyle">
+                <div class="account-table-label">
                 <div class="menu-icon asset-icon"></div>
                     <span>资金账号</span>
                 </div>
-                <div class="menu-item" :style="cellStyle">{{ selectedAccountData[0]?.account_id || '--' }}</div>
+                <div class="account-table-value">{{ selectedAccountData[0]?.account_id || '--' }}</div>
               </div>
               <div class="tableRowClassName({ rowIndex: 1 })">
-                <div class="menu-item" :style="headerStyle">
+                <div class="account-table-label">
                   <div class="menu-icon time-icon"></div>
                     <span>总资产</span>
                 </div>
-                <div class="menu-item" :style="cellStyle">{{ selectedAccountData[0]?.total_asset || '--' }}</div>
+                <div class="account-table-value">{{ selectedAccountData[0]?.total_asset || '--' }}</div>
               </div>
               <div class="tableRowClassName({ rowIndex: 2 })">
-                <div class="menu-item" :style="headerStyle">
+                <div class="account-table-label">
                   <div class="menu-icon region-icon"></div>
                     <span>可用金额</span>
                 </div>
-                <div class="menu-item" :style="cellStyle">{{ selectedAccountData[0]?.cash || '--' }}</div>
+                <div class="account-table-value">{{ selectedAccountData[0]?.cash || '--' }}</div>
               </div>
               <div class="tableRowClassName({ rowIndex: 3 })">
-                <div class="menu-item" :style="headerStyle">
+                <div class="account-table-label">
                   <div class="menu-icon time-icon"></div>
                     <span>总收益率</span>
                 </div>
-                <div class="menu-item" :style="cellStyle">{{ selectedAccountData[0]?.total_return_rate || '--' }}</div>
+                <div class="account-table-value">{{ selectedAccountData[0]?.total_return_rate || '--' }}</div>
               </div>
               <div class="tableRowClassName({ rowIndex: 4})">
-                <div class="menu-item" :style="headerStyle">
+                <div class="account-table-label">
                   <div class="menu-icon asset-icon"></div>
                     <span>持仓股数</span>
                 </div>
-                <div class="menu-item" :style="cellStyle">{{ selectedAccountData[0]?.total_positions || '--' }}</div>
+                <div class="account-table-value">{{ selectedAccountData[0]?.total_positions || '--' }}</div>
               </div>
               <div class="tableRowClassName({ rowIndex: 5 })">
-                <div class="menu-item" :style="headerStyle">
+                <div class="account-table-label">
                   <div class="menu-icon time-icon"></div>
                     <span>持仓市值</span>
                 </div>
-                <div class="menu-item" :style="cellStyle">{{ selectedAccountData[0]?.market_value || '--' }}</div>
+                <div class="account-table-value">{{ selectedAccountData[0]?.market_value || '--' }}</div>
               </div>
             </div>
           </div>
@@ -169,9 +165,9 @@
 /* Vue 响应式和生命周期函数 */
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 /* 导入了两个 API */
-import { fetchAccountInfo } from '@/api/accountApi.js';
 import { fetchRiskAssessment } from '@/api/riskThresholdApi.js';
 import { useAccountStore } from '@/store';
+import { usePortfolioLiveStore } from '@/store/portfolioLive.js';
 /* 4 个子组件 */
 import InputModule from '@/components/layout/InputModule.vue';
 import OrderModule from '@/components/layout/OrderModule.vue';
@@ -188,103 +184,47 @@ export default {
   },
   setup() {
     const accountStore = useAccountStore();
-    // 账户相关数据（响应数据）accounts：所有账户列表；selectedAccount：当前选中的账户 ID；refreshTimer：定时器，用来每 3 秒刷新一次数据
-    const accounts = ref([]);
-    const selectedAccount = ref('');
-    let refreshTimer = null; // 定时器
-
-    const headerStyle = () => ({
-      backgroundColor: 'rgba(64, 224, 255, 0.2)',
-      color: '#000000',
-      fontWeight: 'bold',
-      padding: '8px 0',
-      textAlign: 'center',
-      borderBottom: '1px solid rgba(64, 224, 255, 0.3)'
-    });
-
-    const cellStyle = ({ column }) => ({
-      padding: '8px 0',
-      textAlign: column?.align || 'center',
-      color: '#000000',
-      backgroundColor: 'transparent',
-      borderBottom: '1px solid rgba(255, 255, 255, 0.1)'
-    });
-
-    const tableRowClassName = ({ rowIndex }) => {
-      if (rowIndex % 2 === 0) {
-        return 'even-row';
-      }
-      return '';
-    };
-
-    //获取账户信息（支持重复调用）
-    //请求账户信息const data = await fetchAccountInfo();
-    //把接口返回的账户数据映射处理accounts.value = data.accounts.map((account) => { ... }
-    const loadAccountData = async () => {
-      try {
-        console.log('🔄 3秒刷新：开始获取账户信息...');
-        const data = await fetchAccountInfo();
-        if (data && data.accounts) {
-          accounts.value = data.accounts.map((account) => {
-            const totalReturnRate = Number(account.total_return_rate || 0);
-            const totalPositions = Array.isArray(account.positions) ? account.positions.length : 0;
-
-            return {
-              ...account,
-              total_return_rate: `${totalReturnRate.toFixed(2)}%`,
-              total_positions: totalPositions,
-            };
-          });
-
-          if (accounts.value.length > 0) {
-            const hasSelectedAccount = accounts.value.some((acc) => acc.account_id === selectedAccount.value);
-            if (!hasSelectedAccount) {
-              selectedAccount.value = accounts.value[0].account_id;
-            }
-          }
-        }
-      } catch (error) {
-        console.error('获取账户信息失败：', error);
-      }
-    };
+    const portfolioLiveStore = usePortfolioLiveStore();
+    // 交易页与资产展示页共用同一份 Redis 实时组合快照，避免旧实现的
+    // “账户列表 + 每个账户一次持仓请求”在 3 秒定时器中重复执行。
+    const accounts = computed(() => portfolioLiveStore.accounts);
+    const selectedAccount = computed(() => portfolioLiveStore.selectedAccountId);
+    const currentLegacyAccount = computed(() => portfolioLiveStore.currentLegacyAccount);
 
     onMounted(async () => {
-      // 首次加载
-      await loadAccountData();
-      //  核心：每 3 秒刷新一次
-      refreshTimer = setInterval(() => {
-        loadAccountData();
-      }, 3000); // 3000ms = 3秒
+      try {
+        await portfolioLiveStore.initialize();
+        portfolioLiveStore.startPolling();
+      } catch (error) {
+        console.error('初始化实时账户数据失败：', error);
+      }
     });
 
-    // 页面销毁时清除定时器（防止内存泄漏）
     onUnmounted(() => {
-      if (refreshTimer) {
-        clearInterval(refreshTimer);
-        refreshTimer = null;
-      }
+      portfolioLiveStore.stopPolling();
     });
 
 
 
     const selectedAccountData = computed(() => {
-      const account = accounts.value.find((acc) => acc.account_id === selectedAccount.value);
+      const account = currentLegacyAccount.value;
       if (!account) return [];
+      const totalReturnRate = Number(account.total_return_rate || 0);
       return [
         {
           account_id: account.display_account_id || account.external_account_id || account.account_id,
           total_asset: formatNumber(account.total_asset, 2),
           cash: formatNumber(account.cash, 2),
           frozen_cash: formatNumber(account.frozen_cash, 2),
-          total_return_rate: account.total_return_rate,
-          total_positions: formatNumber(account.total_positions, 0),
+          total_return_rate: `${totalReturnRate.toFixed(2)}%`,
+          total_positions: formatNumber(account.total_positions || account.positions?.length, 0),
           market_value: formatNumber(account.market_value, 2),
         },
       ];
     });
 
     const selectedStocks = computed(() => {
-      const account = accounts.value.find((acc) => acc.account_id === selectedAccount.value);
+      const account = currentLegacyAccount.value;
       if (!account || !account.positions) return [];
       return account.positions;
     });
@@ -330,18 +270,14 @@ export default {
     const getChartType = computed(() => activeMenu.value);
     const getTableType = computed(() => activeMenu.value);
 
-    watch([accounts, selectedAccount], () => {
-      const currentAccount = accounts.value.find((acc) => acc.account_id === selectedAccount.value) || {};
-      accountStore.setSelectedAccountId(selectedAccount.value);
-      accountStore.setAccountInfo(currentAccount);
+    watch(currentLegacyAccount, (currentAccount) => {
+      accountStore.setSelectedAccountId(portfolioLiveStore.selectedAccountId);
+      accountStore.setAccountInfo(currentAccount || {});
     }, { immediate: true });
 
     return {
       accounts,
       selectedAccount,
-      headerStyle,
-      cellStyle,
-      tableRowClassName,
       selectedAccountData,
       selectedStocks,
       formatNumber,
@@ -449,13 +385,15 @@ export default {
   min-width: 180px;
   display: flex;
   flex-direction: column;
+  background: rgba(12, 20, 38, 0.72);
+  border-radius: 0;
+  box-shadow: none;
+  animation: none;
 }
 
 .sidebar-header {
-  padding: 15px;
-  background: linear-gradient(135deg,
-    rgba(64, 224, 255, 0.1) 0%,
-    rgba(30, 144, 255, 0.05) 100%);
+  padding: 14px 15px;
+  background: rgba(64, 224, 255, 0.04);
   border-bottom: 1px solid rgba(64, 224, 255, 0.2);
   display: flex;
   align-items: center;
@@ -480,10 +418,58 @@ export default {
 
 .sidebar-menu {
   flex: 1;
-  padding: 10px;
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
+  gap: 6px;
+}
+
+.account-table {
+  margin-top: 2px;
+  overflow: hidden;
+  border-top: 1px solid rgba(64, 224, 255, 0.18);
+  border-bottom: 1px solid rgba(64, 224, 255, 0.18);
+}
+
+.account-table > div {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+  padding: 8px 4px 9px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.account-table > div:nth-child(even) {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.account-table > div:last-child {
+  border-bottom: 0;
+}
+
+.account-table-label,
+.account-table-value {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 0 4px;
+}
+
+.account-table-label {
   gap: 8px;
+  color: #40e0ff;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.account-table-value {
+  justify-content: flex-start;
+  padding-top: 3px;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  overflow-wrap: anywhere;
 }
 
 /* 执行策略图标（用「数据/策略」类图标，和图2「数据展示」风格匹配） */

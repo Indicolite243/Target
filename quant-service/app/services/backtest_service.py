@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import shutil
@@ -65,21 +64,54 @@ def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
     benchmark0 = benchmark[0]
     strategy = [round(value - strategy0, 4) for value in strategy]
     benchmark = [round(value - benchmark0, 4) for value in benchmark]
-    excess = [round(left - right, 4) for left, right in zip(strategy, benchmark)]
-    total_return = strategy[-1]
-    annual_return = ((1 + total_return / 100) ** (252 / len(dates)) - 1) * 100
-    net_values = np.array([1 + value / 100 for value in strategy])
-    drawdowns = (net_values - np.maximum.accumulate(net_values)) / np.maximum.accumulate(net_values)
-    daily = np.diff(np.array(strategy)) / 100
-    sharpe = 0.0
-    if daily.size and float(daily.std()) > 0:
-        sharpe = float(((daily - 0.0175 / 252).mean() / daily.std()) * math.sqrt(252))
+    strategy_nav = 1.0 + np.asarray(strategy, dtype=float) / 100.0
+    benchmark_nav = 1.0 + np.asarray(benchmark, dtype=float) / 100.0
+    excess = np.round((strategy_nav / benchmark_nav - 1.0) * 100.0, 4).tolist()
+    strategy_path = np.concatenate(([1.0], strategy_nav))
+    benchmark_path = np.concatenate(([1.0], benchmark_nav))
+    daily = strategy_path[1:] / strategy_path[:-1] - 1.0
+    benchmark_daily = benchmark_path[1:] / benchmark_path[:-1] - 1.0
+    n_daily = len(daily)
+    total_return = float(strategy[-1])
+    benchmark_total_return = float(benchmark[-1])
+    annual_return_decimal = float(strategy_nav[-1] ** (250.0 / n_daily) - 1.0) if n_daily and strategy_nav[-1] > 0 else -1.0
+    benchmark_annual_decimal = float(benchmark_nav[-1] ** (250.0 / n_daily) - 1.0) if n_daily and benchmark_nav[-1] > 0 else -1.0
+    annual_return = annual_return_decimal * 100.0
+    benchmark_annual_return = benchmark_annual_decimal * 100.0
+    drawdowns = (strategy_path - np.maximum.accumulate(strategy_path)) / np.maximum.accumulate(strategy_path)
+    volatility = float(np.sqrt((250.0 / n_daily) * np.square(daily - daily.mean()).sum())) if n_daily else 0.0
+    benchmark_centered = benchmark_daily - benchmark_daily.mean() if n_daily else np.array([])
+    strategy_centered = daily - daily.mean() if n_daily else np.array([])
+    benchmark_variation = float(np.square(benchmark_centered).sum()) if n_daily else 0.0
+    beta = float((strategy_centered * benchmark_centered).sum() / benchmark_variation) if benchmark_variation > 0 else 0.0
+    active = daily - benchmark_daily
+    tracking_error = (
+        float(np.sqrt((250.0 / (n_daily - 1)) * np.square(active - active.mean()).sum()))
+        if n_daily > 1 else 0.0
+    )
+    downside = np.where(daily < benchmark_daily, active, 0.0)
+    downside_risk = float(np.sqrt((250.0 / n_daily) * np.square(downside).sum())) if n_daily else 0.0
+    risk_free_rate = float(os.environ.get("BACKTEST_RISK_FREE_RATE", "0.0195"))
+    alpha = annual_return_decimal - risk_free_rate - beta * (benchmark_annual_decimal - risk_free_rate)
+    sharpe = (annual_return_decimal - risk_free_rate) / volatility if volatility > 0 else 0.0
+    sortino = (annual_return_decimal - risk_free_rate) / downside_risk if downside_risk > 0 else 0.0
+    information_ratio = float(active.mean() * 250.0 / tracking_error) if tracking_error > 0 else 0.0
     metrics = dict(raw.get("metrics") or {})
     metrics.update({
         "total_return": f"{total_return:.2f}%",
+        "benchmark_return": f"{benchmark_total_return:.2f}%",
         "annual_return": f"{annual_return:.2f}%",
+        "benchmark_annual_return": f"{benchmark_annual_return:.2f}%",
         "max_drawdown": f"{abs(float(drawdowns.min())) * 100:.2f}%",
         "sharpe_ratio": f"{sharpe:.2f}",
+        "sortino_ratio": f"{sortino:.2f}",
+        "alpha": f"{alpha:.2f}",
+        "beta": f"{beta:.2f}",
+        "volatility": f"{volatility:.2f}",
+        "tracking_error": f"{tracking_error:.2f}",
+        "information_ratio": f"{information_ratio:.2f}",
+        "downside_risk": f"{downside_risk:.2f}",
+        "win_rate": f"{float((daily > 0).mean()) * 100:.2f}%" if n_daily else "0.00%",
     })
     normalized = dict(raw)
     normalized.update({
@@ -155,11 +187,11 @@ async def run_backtest(
         "PYTHONIOENCODING": "utf-8",
         "BACKTEST_START_DATE": start_date,
         "BACKTEST_END_DATE": end_date,
-        "BACKTEST_BENCHMARK": benchmark_symbol or "510300.SH",
+        "BACKTEST_BENCHMARK": benchmark_symbol or "000300.SH",
         "BACKTEST_ENABLE_BEAR_PROTECTION": "1" if enable_bear_protection else "0",
         "BACKTEST_DATA_DIR": str(work_dir),
         "BACKTEST_RESULT_JSON_PATH": str(result_path),
-        "BACKTEST_RISK_FREE_RATE": "0.0175",
+        "BACKTEST_RISK_FREE_RATE": os.environ.get("BACKTEST_RISK_FREE_RATE", "0.0195"),
     })
     runner = Path(__file__).with_name("mindgo_runner.py")
     command = [sys.executable, str(runner), str(strategy_path)] if resolved_engine == "mindgo" else [sys.executable, str(strategy_path)]

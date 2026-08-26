@@ -1,6 +1,8 @@
 ﻿import importlib.util
 import json
+import math
 import os
+import site
 import sys
 import types
 from dataclasses import dataclass
@@ -13,10 +15,30 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
-try:
-    from xtquant import xtdata
-except Exception:
-    xtdata = None
+def _load_xtdata_module():
+    try:
+        from xtquant import xtdata as module
+        return module
+    except Exception:
+        candidates = []
+        configured = os.environ.get("QUANT_XTQUANT_SITE_PACKAGES", "").strip()
+        if configured:
+            candidates.append(configured)
+        user_sites = site.getusersitepackages()
+        candidates.extend([user_sites] if isinstance(user_sites, str) else list(user_sites))
+        candidates.append(str(Path(sys.base_prefix) / "Lib" / "site-packages"))
+        for candidate in candidates:
+            if candidate and Path(candidate).is_dir() and candidate not in sys.path:
+                sys.path.append(candidate)
+        try:
+            import importlib
+            importlib.invalidate_caches()
+            return importlib.import_module("xtquant.xtdata")
+        except Exception:
+            return None
+
+
+xtdata = _load_xtdata_module()
 
 
 ENGINE = None
@@ -26,6 +48,7 @@ ENGINE = None
 class PerShare:
     type: str = "stock"
     cost: float = 0.0
+    min_trade_cost: float = 5.0
 
 
 @dataclass
@@ -37,6 +60,14 @@ class PriceSlippage:
 class Position:
     amount: float = 0.0
     avg_cost: float = 0.0
+
+    @property
+    def available_amount(self):
+        return self.amount
+
+    @property
+    def total_amount(self):
+        return self.amount
 
 
 @dataclass
@@ -91,9 +122,13 @@ class MindgoBacktestEngine:
         self.benchmark_symbol = os.environ.get("BACKTEST_BENCHMARK", "000300.SH")
         self.log = StrategyLogger()
         self.commission_rate = 0.0
+        self.min_trade_cost = 5.0
         self.slippage_perc = 0.0
-        self.volume_limit_ratio = float(os.environ.get("BACKTEST_VOLUME_LIMIT_RATIO", "1.0"))
-        self.risk_free_rate = float(os.environ.get("BACKTEST_RISK_FREE_RATE", "0.0175"))
+        self.volume_limit_ratio = float(os.environ.get("BACKTEST_VOLUME_LIMIT_RATIO", "0.25"))
+        self.minute_volume_limit_ratio = float(os.environ.get("BACKTEST_MINUTE_VOLUME_LIMIT_RATIO", "0.5"))
+        self.lot_size = max(1, int(os.environ.get("BACKTEST_LOT_SIZE", "100")))
+        # SuperMind 使用回测区间十年期国债收益率均值；当前黄金样本对应约 1.95%。
+        self.risk_free_rate = float(os.environ.get("BACKTEST_RISK_FREE_RATE", "0.0195"))
         self.current_dt = self.start_date.to_pydatetime()
         self.current_date = self.start_date
         self.current_phase = "init"
@@ -105,6 +140,8 @@ class MindgoBacktestEngine:
         self.trade_records = []
         self.data_cache = {}
         self.benchmark_cache = {}
+        self.corporate_actions_cache = {}
+        self.applied_corporate_actions = set()
         self.artifacts = {}
         self.context = SimpleNamespace()
         self.context.portfolio = Portfolio(self)
@@ -152,16 +189,49 @@ class MindgoBacktestEngine:
             df["low_pre"] = df["low"]
             df["close_pre"] = df["close"]
 
+        df = self._extend_with_xtdata(code, df)
+
         self.data_cache[code] = df
         return df
 
-    def _load_xtdata_symbol(self, code):
-        if code in self.benchmark_cache:
-            return self.benchmark_cache[code]
-        if xtdata is None:
-            raise FileNotFoundError(f"未找到行情文件，且 xtdata 不可用: {code}")
+    def _extend_with_xtdata(self, code, frame):
+        if xtdata is None or frame.empty:
+            return frame
+        need_before = self.start_date < frame.index.min()
+        need_after = self.end_date > frame.index.max()
+        if not need_before and not need_after:
+            return frame
+        try:
+            downloaded = self._download_xtdata_frame(code)
+        except Exception as exc:
+            self.log.warning(f"{code} 行情自动补齐失败: {exc}")
+            return frame
+        if downloaded is None or downloaded.empty:
+            return frame
+        common_dates = frame.index.intersection(downloaded.index)
+        if len(common_dates) > 0 and "close_pre" in frame.columns and "close_pre" in downloaded.columns:
+            overlap_date = common_dates[-1]
+            local_pre = float(frame.at[overlap_date, "close_pre"])
+            downloaded_pre = float(downloaded.at[overlap_date, "close_pre"])
+            if local_pre > 0 and downloaded_pre > 0:
+                pre_scale = local_pre / downloaded_pre
+                for col in ["open_pre", "high_pre", "low_pre", "close_pre"]:
+                    downloaded[col] = downloaded[col] * pre_scale
+        combined = pd.concat([frame, downloaded], axis=0)
+        combined = combined[~combined.index.duplicated(keep="first")].sort_index()
+        for col in ["open", "high", "low", "close"]:
+            combined[col] = pd.to_numeric(combined[col], errors="coerce").ffill()
+        combined["volume"] = pd.to_numeric(combined.get("volume", 0), errors="coerce").fillna(0.0)
+        for col in ["open_pre", "high_pre", "low_pre", "close_pre"]:
+            if col not in combined.columns:
+                combined[col] = combined[col.replace("_pre", "")]
+            combined[col] = combined[col].fillna(combined[col.replace("_pre", "")])
+        return combined
 
-        start_time = (self.start_date - pd.Timedelta(days=10)).strftime("%Y%m%d")
+    def _download_xtdata_frame(self, code):
+        if xtdata is None:
+            return None
+        start_time = (self.start_date - pd.Timedelta(days=370)).strftime("%Y%m%d")
         end_time = self.end_date.strftime("%Y%m%d")
         xtdata.download_history_data(code, period="1d", start_time=start_time, end_time=end_time)
         market = xtdata.get_market_data_ex(
@@ -170,27 +240,52 @@ class MindgoBacktestEngine:
             start_time=start_time,
             end_time=end_time,
             count=-1,
+            dividend_type="none",
+            fill_data=True,
         )
         df = market.get(code) if isinstance(market, dict) else None
         if df is None or df.empty:
-            raise FileNotFoundError(f"无法从 xtdata 获取基准数据: {code}")
-
+            return None
         df = df.copy()
         parsed_index = pd.to_datetime(df.index.astype(str), format="%Y%m%d", errors="coerce")
-        if not parsed_index.isna().all():
-            df.index = parsed_index
-            df = df[~df.index.isna()].sort_index()
-        elif "time" in df.columns:
-            df["time"] = pd.to_datetime(df["time"], unit="ms", errors="coerce")
-            df["time"] = df["time"].dt.floor("D")
-            df = df.dropna(subset=["time"]).sort_values("time").set_index("time")
-        else:
-            df.index = pd.to_datetime(df.index, errors="coerce")
-            df = df[~df.index.isna()].sort_index()
-
+        if parsed_index.isna().all() and "time" in df.columns:
+            parsed_index = pd.to_datetime(df["time"], unit="ms", errors="coerce").dt.floor("D")
+        df.index = parsed_index
+        df = df[~df.index.isna()].sort_index()
         for col in ["open", "high", "low", "close", "volume"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+        adjusted_market = xtdata.get_market_data_ex(
+            stock_list=[code],
+            period="1d",
+            start_time=start_time,
+            end_time=end_time,
+            count=-1,
+            dividend_type="front",
+            fill_data=True,
+        )
+        adjusted = adjusted_market.get(code) if isinstance(adjusted_market, dict) else None
+        if adjusted is not None and not adjusted.empty:
+            adjusted = adjusted.copy()
+            adjusted.index = pd.to_datetime(adjusted.index.astype(str), format="%Y%m%d", errors="coerce")
+            adjusted = adjusted[~adjusted.index.isna()].sort_index()
+        for col in ["open", "high", "low", "close"]:
+            if adjusted is not None and col in adjusted.columns:
+                df[f"{col}_pre"] = pd.to_numeric(adjusted[col], errors="coerce").reindex(df.index)
+            else:
+                df[f"{col}_pre"] = df[col]
+            df[f"{col}_pre"] = df[f"{col}_pre"].fillna(df[col])
+        return df[["open", "high", "low", "close", "volume", "open_pre", "high_pre", "low_pre", "close_pre"]]
+
+    def _load_xtdata_symbol(self, code):
+        if code in self.benchmark_cache:
+            return self.benchmark_cache[code]
+        if xtdata is None:
+            raise FileNotFoundError(f"未找到行情文件，且 xtdata 不可用: {code}")
+
+        df = self._download_xtdata_frame(code)
+        if df is None or df.empty:
+            raise FileNotFoundError(f"无法从 xtdata 获取基准数据: {code}")
 
         self.benchmark_cache[code] = df
         return df
@@ -204,36 +299,41 @@ class MindgoBacktestEngine:
     def get_price(self, code, start_date=None, end_date=None, bar_count=None, fre_step="1d", fields=None, skip_paused=True, fq=None):
         del fre_step, skip_paused
         df = self._load_single_symbol(code)
-        price_df = pd.DataFrame(index=df.index)
-
-        use_pre = fq == "pre"
-        mapping = {
-            "open": "open_pre" if use_pre else "open",
-            "high": "high_pre" if use_pre else "high",
-            "low": "low_pre" if use_pre else "low",
-            "close": "close_pre" if use_pre else "close",
-            "volume": "volume",
-        }
-
-        requested_fields = fields or ["open", "high", "low", "close", "volume"]
-        for field in requested_fields:
-            source_col = mapping.get(field)
-            if source_col and source_col in df.columns:
-                price_df[field] = df[source_col]
-
         if end_date:
-            price_df = price_df.loc[price_df.index <= pd.Timestamp(end_date)]
+            df = df.loc[df.index <= pd.Timestamp(end_date)]
         if start_date:
-            price_df = price_df.loc[price_df.index >= pd.Timestamp(start_date)]
+            df = df.loc[df.index >= pd.Timestamp(start_date)]
         if bar_count:
-            price_df = price_df.tail(int(bar_count))
+            df = df.tail(int(bar_count))
+
+        price_df = pd.DataFrame(index=df.index)
+        requested_fields = fields or ["open", "high", "low", "close", "volume"]
+        if fq == "pre" and not df.empty and "close_pre" in df.columns:
+            anchor = df.iloc[-1]
+            anchor_adjusted = float(anchor.get("close_pre", 0.0) or 0.0)
+            anchor_close = float(anchor.get("close", 0.0) or 0.0)
+            anchor_scale = anchor_close / anchor_adjusted if anchor_adjusted > 0 and anchor_close > 0 else 1.0
+            for field in requested_fields:
+                if field == "volume":
+                    price_df[field] = df["volume"]
+                elif f"{field}_pre" in df.columns:
+                    price_df[field] = df[f"{field}_pre"] * anchor_scale
+        else:
+            for field in requested_fields:
+                if field in df.columns:
+                    price_df[field] = df[field]
         return price_df.copy()
 
     def set_commission(self, commission):
         self.commission_rate = float(getattr(commission, "cost", 0.0))
+        self.min_trade_cost = max(0.0, float(getattr(commission, "min_trade_cost", 5.0)))
 
     def set_slippage(self, slippage):
         self.slippage_perc = float(getattr(slippage, "perc", 0.0))
+
+    def set_volume_limit(self, daily_ratio=0.25, minute_ratio=0.5):
+        self.volume_limit_ratio = max(0.0, float(daily_ratio))
+        self.minute_volume_limit_ratio = max(0.0, float(minute_ratio))
 
     def set_benchmark(self, benchmark_symbol):
         if benchmark_symbol:
@@ -249,10 +349,17 @@ class MindgoBacktestEngine:
         return raw_price * (1.0 + half_slippage if is_buy else 1.0 - half_slippage)
 
     def _consume_trade_volume(self, code, requested_qty):
+        lot = float(self.lot_size)
+        requested_qty = math.floor(max(0.0, float(requested_qty)) / lot) * lot
         remaining = float(self.current_remaining_volume.get(code, 0.0))
-        actual_qty = min(float(requested_qty), remaining)
+        actual_qty = min(requested_qty, math.floor(remaining / lot) * lot)
         self.current_remaining_volume[code] = max(0.0, remaining - actual_qty)
         return actual_qty
+
+    def _trade_fee(self, trade_value):
+        if trade_value <= 0:
+            return 0.0
+        return max(trade_value * self.commission_rate, self.min_trade_cost)
 
     def _append_trade(self, code, action, quantity, exec_price, fee):
         self.trade_records.append({
@@ -282,7 +389,7 @@ class MindgoBacktestEngine:
         action = "买入" if is_buy else "卖出"
 
         if is_buy:
-            max_notional = self.context.portfolio.cash / (1.0 + self.commission_rate)
+            max_notional = max(0.0, self.context.portfolio.cash - self.min_trade_cost) / (1.0 + self.commission_rate)
             target_notional = min(delta_value, max_notional)
             if target_notional <= 0:
                 return None
@@ -291,15 +398,19 @@ class MindgoBacktestEngine:
             if quantity <= 0:
                 return None
             trade_value = quantity * exec_price
-            fee = trade_value * self.commission_rate
+            fee = self._trade_fee(trade_value)
             total_cost = trade_value + fee
             if total_cost > self.context.portfolio.cash:
-                quantity = self.context.portfolio.cash / (exec_price * (1.0 + self.commission_rate))
-                quantity = self._consume_trade_volume(code, quantity)
+                affordable = math.floor(
+                    max(0.0, self.context.portfolio.cash - self.min_trade_cost)
+                    / (exec_price * (1.0 + self.commission_rate))
+                    / self.lot_size
+                ) * self.lot_size
+                quantity = min(quantity, affordable)
                 if quantity <= 0:
                     return None
                 trade_value = quantity * exec_price
-                fee = trade_value * self.commission_rate
+                fee = self._trade_fee(trade_value)
                 total_cost = trade_value + fee
             previous_cost = position.avg_cost * position.amount
             position.amount += quantity
@@ -315,7 +426,7 @@ class MindgoBacktestEngine:
             if quantity <= 0:
                 return None
             trade_value = quantity * exec_price
-            fee = trade_value * self.commission_rate
+            fee = self._trade_fee(trade_value)
             self.context.portfolio.cash += trade_value - fee
             position.amount -= quantity
             if position.amount <= 1e-12:
@@ -366,10 +477,10 @@ class MindgoBacktestEngine:
             frame = self._load_single_symbol(code)
             row = frame.loc[current_date]
             bar_dict[code] = Bar(
-                open=float(row["open_pre"]),
-                high=float(row["high_pre"]),
-                low=float(row["low_pre"]),
-                close=float(row["close_pre"]),
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
                 volume=float(row["volume"]),
                 raw_open=float(row["open"]),
                 raw_high=float(row["high"]),
@@ -378,19 +489,86 @@ class MindgoBacktestEngine:
             )
         return bar_dict
 
+    def _load_corporate_actions(self, code):
+        if code in self.corporate_actions_cache:
+            return self.corporate_actions_cache[code]
+        actions = {}
+        if xtdata is not None:
+            try:
+                frame = xtdata.get_divid_factors(code)
+                if frame is not None and not frame.empty:
+                    for index, row in frame.iterrows():
+                        digits = "".join(ch for ch in str(index) if ch.isdigit())[:8]
+                        if len(digits) != 8:
+                            timestamp = pd.to_datetime(row.get("time"), unit="ms", errors="coerce")
+                            digits = "" if pd.isna(timestamp) else timestamp.strftime("%Y%m%d")
+                        if len(digits) == 8:
+                            actions[digits] = {
+                                "interest": float(row.get("interest", 0.0) or 0.0),
+                                "stock_bonus": float(row.get("stockBonus", 0.0) or 0.0),
+                                "stock_gift": float(row.get("stockGift", 0.0) or 0.0),
+                                "allot_num": float(row.get("allotNum", 0.0) or 0.0),
+                                "allot_price": float(row.get("allotPrice", 0.0) or 0.0),
+                            }
+            except Exception as exc:
+                self.log.warning(f"{code} 除权除息数据读取失败: {exc}")
+        self.corporate_actions_cache[code] = actions
+        return actions
+
+    def _apply_corporate_actions(self, current_date, symbols):
+        date_key = pd.Timestamp(current_date).strftime("%Y%m%d")
+        for code in symbols:
+            action_key = (code, date_key)
+            if action_key in self.applied_corporate_actions:
+                continue
+            self.applied_corporate_actions.add(action_key)
+            position = self.context.portfolio.positions.get(code)
+            if position is None or position.amount <= 0:
+                continue
+            action = self._load_corporate_actions(code).get(date_key)
+            if not action:
+                continue
+            old_amount = float(position.amount)
+            interest = max(0.0, action["interest"])
+            if interest > 0:
+                self.context.portfolio.cash += old_amount * interest
+                position.avg_cost = max(0.0, position.avg_cost - interest)
+            share_factor = 1.0 + action["stock_bonus"] + action["stock_gift"]
+            if share_factor > 0 and abs(share_factor - 1.0) > 1e-12:
+                position.amount = math.floor(old_amount * share_factor)
+                position.avg_cost = position.avg_cost / share_factor
+            allot_num = max(0.0, action["allot_num"])
+            allot_price = max(0.0, action["allot_price"])
+            if allot_num > 0 and allot_price > 0:
+                allot_shares = math.floor(old_amount * allot_num)
+                affordable = math.floor(self.context.portfolio.cash / allot_price)
+                allot_shares = min(allot_shares, affordable)
+                if allot_shares > 0:
+                    previous_cost = position.avg_cost * position.amount
+                    position.amount += allot_shares
+                    self.context.portfolio.cash -= allot_shares * allot_price
+                    position.avg_cost = (previous_cost + allot_shares * allot_price) / position.amount
+
     def _prepare_daily_state(self, current_date, symbols):
         self.current_date = pd.Timestamp(current_date)
+        self._apply_corporate_actions(self.current_date, symbols)
         self.current_bars = self.build_bars(symbols, self.current_date)
         self.current_exec_prices = {
-            code: (bar.close if bar.close > 0 else bar.raw_close)
+            code: (bar.raw_open if bar.raw_open > 0 else bar.raw_close)
             for code, bar in self.current_bars.items()
         }
         self.current_mark_prices = {
-            code: (bar.close if bar.close > 0 else bar.raw_close)
+            code: (bar.raw_open if bar.raw_open > 0 else bar.raw_close)
             for code, bar in self.current_bars.items()
         }
         self.current_remaining_volume = {
-            code: max(0.0, bar.volume * self.volume_limit_ratio)
+            code: math.floor(max(0.0, bar.volume * self.volume_limit_ratio) / self.lot_size) * self.lot_size
+            for code, bar in self.current_bars.items()
+        }
+
+    def _mark_to_close(self):
+        self.current_mark_prices = {
+            code: (bar.raw_close if bar.raw_close > 0 else bar.raw_open)
             for code, bar in self.current_bars.items()
         }
 
@@ -430,65 +608,70 @@ class MindgoBacktestEngine:
         benchmark_history = benchmark_close_series.loc[benchmark_close_series.index < first_trade_date]
         benchmark_base = float(benchmark_history.iloc[-1]) if len(benchmark_history) > 0 else None
 
-        strategy_returns = []
-        benchmark_returns = []
-        excess_returns = []
+        strategy_nav = []
+        benchmark_nav = []
 
         for date_str in ordered_dates:
             record = self.records[date_str]
             net_value = float(record.get("net_value", start_cash))
-            strategy_ret = (net_value / start_cash - 1.0) * 100.0
-            strategy_returns.append(round(strategy_ret, 2))
+            strategy_nav.append(net_value / start_cash)
 
             bench_close = self._get_series_value_on_or_before(benchmark_close_series, date_str)
             if benchmark_base is None:
                 benchmark_base = bench_close
-            benchmark_ret = (bench_close / benchmark_base - 1.0) * 100.0
-            benchmark_returns.append(round(benchmark_ret, 2))
-            excess_returns.append(round(strategy_ret - benchmark_ret, 2))
+            benchmark_nav.append(bench_close / benchmark_base)
 
-        strategy_nav = np.array([1 + ret / 100.0 for ret in strategy_returns], dtype=float)
-        benchmark_nav = np.array([1 + ret / 100.0 for ret in benchmark_returns], dtype=float)
-        nv_series = strategy_nav
+        strategy_nav = np.asarray(strategy_nav, dtype=float)
+        benchmark_nav = np.asarray(benchmark_nav, dtype=float)
+        strategy_returns = np.round((strategy_nav - 1.0) * 100.0, 2).tolist()
+        benchmark_returns = np.round((benchmark_nav - 1.0) * 100.0, 2).tolist()
+        # SuperMind 的超额收益采用复合净值比，而不是策略收益率减基准收益率。
+        excess_returns = np.round((strategy_nav / benchmark_nav - 1.0) * 100.0, 2).tolist()
+
+        # 首个交易日同样存在从初始资金到收盘净值的一日收益，必须显式补入 1.0。
+        nv_series = np.concatenate(([1.0], strategy_nav))
         peak = np.maximum.accumulate(nv_series)
         drawdown = (nv_series - peak) / peak
         max_drawdown = abs(float(np.min(drawdown))) * 100 if len(drawdown) else 0.0
 
-        if len(strategy_returns) > 1:
-            daily_returns = pd.Series(strategy_nav).pct_change().dropna()
-            benchmark_daily_returns = pd.Series(benchmark_nav).pct_change().dropna()
-            paired = pd.concat([daily_returns, benchmark_daily_returns], axis=1, join="inner")
-            paired.columns = ["strategy", "benchmark"]
-        else:
-            daily_returns = pd.Series(dtype=float)
-            benchmark_daily_returns = pd.Series(dtype=float)
-            paired = pd.DataFrame(columns=["strategy", "benchmark"])
+        daily_returns = pd.Series(nv_series).pct_change().dropna().reset_index(drop=True)
+        benchmark_daily_returns = pd.Series(
+            np.concatenate(([1.0], benchmark_nav))
+        ).pct_change().dropna().reset_index(drop=True)
+        paired = pd.concat([daily_returns, benchmark_daily_returns], axis=1, join="inner")
+        paired.columns = ["strategy", "benchmark"]
 
         n_daily = len(daily_returns)
         if n_daily > 0:
-            annual_factor = 250.0 / n_daily
             daily_mean = float(daily_returns.mean())
-            volatility = float(np.sqrt(annual_factor * np.square(daily_returns - daily_mean).sum()))
+            volatility = float(np.sqrt((250.0 / n_daily) * np.square(daily_returns - daily_mean).sum()))
             win_rate = float((daily_returns > 0).mean())
         else:
             volatility = 0.0
             win_rate = 0.0
 
-        if len(paired) > 1 and paired["benchmark"].var() > 0:
-            covariance = paired["strategy"].cov(paired["benchmark"])
-            beta = covariance / paired["benchmark"].var()
+        if len(paired) > 1:
+            benchmark_centered = paired["benchmark"] - paired["benchmark"].mean()
+            strategy_centered = paired["strategy"] - paired["strategy"].mean()
+            benchmark_sum_squares = float(np.square(benchmark_centered).sum())
+        else:
+            benchmark_sum_squares = 0.0
+        if benchmark_sum_squares > 0:
+            beta = float((strategy_centered * benchmark_centered).sum() / benchmark_sum_squares)
             active_return = paired["strategy"] - paired["benchmark"]
         else:
             beta = 0.0
             active_return = pd.Series(dtype=float)
 
-        total_return = strategy_returns[-1]
-        annual_return = ((1 + total_return / 100.0) ** (250.0 / len(strategy_returns)) - 1) * 100 if strategy_returns else 0.0
-        benchmark_total_return = benchmark_returns[-1] if benchmark_returns else 0.0
-        benchmark_annual_return = ((1 + benchmark_total_return / 100.0) ** (250.0 / len(benchmark_returns)) - 1) * 100 if benchmark_returns else 0.0
+        total_return_decimal = float(strategy_nav[-1] - 1.0)
+        benchmark_total_return_decimal = float(benchmark_nav[-1] - 1.0)
+        annual_return_decimal = float(strategy_nav[-1] ** (250.0 / n_daily) - 1.0) if n_daily else 0.0
+        benchmark_annual_return_decimal = float(benchmark_nav[-1] ** (250.0 / n_daily) - 1.0) if n_daily else 0.0
+        total_return = total_return_decimal * 100.0
+        benchmark_total_return = benchmark_total_return_decimal * 100.0
+        annual_return = annual_return_decimal * 100.0
+        benchmark_annual_return = benchmark_annual_return_decimal * 100.0
 
-        annual_return_decimal = annual_return / 100.0
-        benchmark_annual_return_decimal = benchmark_annual_return / 100.0
         risk_free_rate = self.risk_free_rate
 
         alpha = annual_return_decimal - risk_free_rate - beta * (benchmark_annual_return_decimal - risk_free_rate)
@@ -497,15 +680,22 @@ class MindgoBacktestEngine:
         if len(active_return) > 1:
             active_mean = float(active_return.mean())
             tracking_error = float(np.sqrt((250.0 / (len(active_return) - 1)) * np.square(active_return - active_mean).sum()))
+            relative_win_rate = float((active_return > 0).mean())
         else:
             tracking_error = 0.0
+            relative_win_rate = 0.0
 
-        information_ratio = ((annual_return_decimal - benchmark_annual_return_decimal) / tracking_error) if tracking_error > 0 else 0.0
+        # SuperMind 页面实际使用年化日主动收益均值；这与文档中的几何年化文字表述略有差异。
+        annual_active_return = float(active_return.mean() * 250.0) if len(active_return) else 0.0
+        information_ratio = annual_active_return / tracking_error if tracking_error > 0 else 0.0
 
         if len(paired) > 0:
-            downside_mask = paired["strategy"] < paired["benchmark"]
-            downside_diff = (paired["strategy"] - paired["benchmark"])[downside_mask]
-            downside_risk = float(np.sqrt((250.0 / len(paired)) * np.square(downside_diff).sum()))
+            downside_returns = np.where(
+                paired["strategy"].to_numpy(dtype=float) < paired["benchmark"].to_numpy(dtype=float),
+                paired["strategy"].to_numpy(dtype=float) - paired["benchmark"].to_numpy(dtype=float),
+                0.0,
+            )
+            downside_risk = float(np.sqrt((250.0 / len(paired)) * np.square(downside_returns).sum()))
         else:
             downside_risk = 0.0
 
@@ -531,6 +721,7 @@ class MindgoBacktestEngine:
             "information_ratio": f"{information_ratio:.2f}",
             "downside_risk": f"{downside_risk:.2f}",
             "win_rate": f"{win_rate * 100:.2f}%",
+            "relative_win_rate": f"{relative_win_rate * 100:.2f}%",
             "final_net_value": f"{final_net_value:,.2f}",
             "trade_count": str(len(self.trade_records)),
             "buy_trade_count": str(buy_trades),
@@ -564,6 +755,7 @@ class MindgoBacktestEngine:
         target_json_path = Path(result_json_path) if result_json_path else (self.data_dir / "strategy_performance.json")
         with open(target_json_path, "w", encoding="utf-8") as f:
             json.dump(json_payload, f, ensure_ascii=False, indent=2)
+        return json_payload
 
     def _export_markdown(self):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -635,6 +827,10 @@ def set_slippage(*args, **kwargs):
     return ENGINE.set_slippage(*args, **kwargs)
 
 
+def set_volume_limit(*args, **kwargs):
+    return ENGINE.set_volume_limit(*args, **kwargs)
+
+
 def set_benchmark(*args, **kwargs):
     return ENGINE.set_benchmark(*args, **kwargs)
 
@@ -669,6 +865,7 @@ def install_mindgo_shim():
     shim.get_price = get_price
     shim.set_commission = set_commission
     shim.set_slippage = set_slippage
+    shim.set_volume_limit = set_volume_limit
     shim.set_benchmark = set_benchmark
     shim.order_value = order_value
     shim.order_target = order_target
@@ -716,6 +913,7 @@ def run(strategy_path):
         if hasattr(strategy_module, "handle_bar"):
             strategy_module.handle_bar(ENGINE.context, ENGINE.current_bars)
 
+        ENGINE._mark_to_close()
         ENGINE._set_phase_time("after_trading")
         if hasattr(strategy_module, "after_trading"):
             strategy_module.after_trading(ENGINE.context)

@@ -36,7 +36,9 @@ public class AuthController {
     }
 
     @PostMapping("/logout")
-    public ApiResponse<Void> logout(HttpServletRequest request) {
+    public ApiResponse<Void> logout(@RequestHeader(name = "Authorization") String authorization,
+                                    HttpServletRequest request) {
+        authService.logout(authorization.substring("Bearer ".length()));
         return ApiResponse.success("退出成功", null, traceId(request));
     }
 

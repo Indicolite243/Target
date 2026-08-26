@@ -44,7 +44,8 @@ public class AnalysisServiceImpl implements AnalysisService {
         Account account = requireAccount(userId, accountId);
         List<Position> positions = positions(accountId);
         List<Map<String, Object>> positionRows = positionRows(positions);
-        String dataSource = "mongodb".equals(source) ? "mongodb_cache" : qmtSource(account);
+        String dataSource = ("mysql".equalsIgnoreCase(source) || "mongodb".equalsIgnoreCase(source))
+                ? "mysql_current" : qmtSource(account);
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("type", "REGION".equals(dimension) || "MARKET".equals(dimension) ? "region" : "asset");

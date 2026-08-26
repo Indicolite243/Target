@@ -17,14 +17,23 @@ spring:
       host: ${REDIS_HOST:127.0.0.1}
       port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD:}
-      timeout: 2s
-    mongodb:
-      uri: ${MONGODB_URI:mongodb://127.0.0.1:27017/stock_manager}
+      connect-timeout: 500ms
+      timeout: 300ms
+      lettuce:
+        pool:
+          max-active: 32
+          max-idle: 16
+          min-idle: 4
+          max-wait: 200ms
   flyway:
     enabled: true
     locations: classpath:db/migration
   jackson:
     time-zone: Asia/Shanghai
+  servlet:
+    multipart:
+      max-file-size: 6MB
+      max-request-size: 56MB
 
 mybatis-plus:
   configuration:
@@ -44,16 +53,48 @@ management:
 app:
   jwt:
     secret: ${JWT_SECRET:change-this-development-secret-to-at-least-32-bytes}
-    expiration-seconds: ${JWT_EXPIRATION_SECONDS:1800}
+    expiration-seconds: ${JWT_EXPIRATION_SECONDS:2592000}
+    blacklist-prefix: ${JWT_BLACKLIST_PREFIX:stock:auth:blacklist:}
   quant-service:
     base-url: ${QUANT_SERVICE_URL:http://127.0.0.1:8000/internal/v1}
     internal-token: ${QUANT_INTERNAL_TOKEN:development-internal-token}
-  snapshot:
-    enabled: ${ACCOUNT_SNAPSHOT_ENABLED:true}
-    account-sync-interval-ms: ${ACCOUNT_SNAPSHOT_ACCOUNT_SYNC_INTERVAL_MS:30000}
-    mongodb-interval-ms: ${ACCOUNT_SNAPSHOT_MONGODB_INTERVAL_MS:300000}
-    daily-cron: ${ACCOUNT_SNAPSHOT_DAILY_CRON:0 10 15 * * MON-FRI}
-    initial-delay-ms: ${ACCOUNT_SNAPSHOT_INITIAL_DELAY_MS:10000}
+    connect-timeout-ms: ${QUANT_CONNECT_TIMEOUT_MS:500}
+    realtime-read-timeout-ms: ${QUANT_REALTIME_READ_TIMEOUT_MS:2000}
+  portfolio-live:
+    enabled: ${PORTFOLIO_LIVE_ENABLED:true}
+    collect-interval-ms: ${PORTFOLIO_COLLECT_INTERVAL_MS:2000}
+    initial-delay-ms: ${PORTFOLIO_COLLECT_INITIAL_DELAY_MS:3000}
+    persist-interval-ms: ${PORTFOLIO_PERSIST_INTERVAL_MS:30000}
+    persist-initial-delay-ms: ${PORTFOLIO_PERSIST_INITIAL_DELAY_MS:15000}
+    redis-ttl-seconds: ${PORTFOLIO_REDIS_TTL_SECONDS:10}
+    offline-probe-interval-ms: ${PORTFOLIO_OFFLINE_PROBE_INTERVAL_MS:5000}
+  portfolio-history:
+    enabled: ${PORTFOLIO_HISTORY_ENABLED:true}
+    asset-interval-ms: ${PORTFOLIO_HISTORY_ASSET_INTERVAL_MS:300000}
+    position-interval-ms: ${PORTFOLIO_HISTORY_POSITION_INTERVAL_MS:900000}
+    initial-delay-ms: ${PORTFOLIO_HISTORY_INITIAL_DELAY_MS:60000}
+    daily-cron: ${PORTFOLIO_HISTORY_DAILY_CRON:0 10 15 * * MON-FRI}
+  quant-task:
+    core-pool-size: ${QUANT_TASK_CORE_POOL_SIZE:2}
+    max-pool-size: ${QUANT_TASK_MAX_POOL_SIZE:4}
+    queue-capacity: ${QUANT_TASK_QUEUE_CAPACITY:32}
+    recovery:
+      enabled: ${QUANT_TASK_RECOVERY_ENABLED:true}
+  backtest:
+    storage-root: ${BACKTEST_STORAGE_ROOT:../runtime/backtests}
+    max-strategy-bytes: ${BACKTEST_MAX_STRATEGY_BYTES:5242880}
+    max-market-file-bytes: ${BACKTEST_MAX_MARKET_FILE_BYTES:20971520}
+    max-market-total-bytes: ${BACKTEST_MAX_MARKET_TOTAL_BYTES:52428800}
+    cleanup:
+      enabled: ${BACKTEST_CLEANUP_ENABLED:false}
+      retention-days: ${BACKTEST_CLEANUP_RETENTION_DAYS:14}
+      cron: ${BACKTEST_CLEANUP_CRON:0 30 3 * * *}
+  order-status:
+    enabled: ${ORDER_STATUS_POLL_ENABLED:true}
+    poll-interval-ms: ${ORDER_STATUS_POLL_INTERVAL_MS:3000}
+    initial-delay-ms: ${ORDER_STATUS_POLL_INITIAL_DELAY_MS:10000}
+  market:
+    quote-cache-ttl-ms: ${MARKET_QUOTE_CACHE_TTL_MS:1000}
 
 springdoc:
   swagger-ui:

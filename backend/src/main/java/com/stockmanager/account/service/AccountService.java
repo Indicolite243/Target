@@ -3,7 +3,7 @@ package com.stockmanager.account.service;
 import com.stockmanager.account.vo.AccountView;
 import com.stockmanager.account.vo.AccountSyncView;
 import com.stockmanager.account.vo.PositionView;
-import com.stockmanager.account.document.AccountSnapshot;
+import com.stockmanager.account.entity.AccountHistorySnapshot;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -14,7 +14,6 @@ public interface AccountService {
     AccountView getAccount(Long userId, Long accountId);
     List<PositionView> listPositions(Long userId, Long accountId);
     AccountSyncView syncAccount(Long userId, Long accountId, String traceId);
-    AccountSyncView syncAccountScheduled(Long userId, Long accountId, String traceId, String snapshotType);
-    List<AccountSnapshot> listSnapshots(Long userId, Long accountId, LocalDate from, LocalDate to);
+    List<AccountHistorySnapshot> listSnapshots(Long userId, Long accountId, LocalDate from, LocalDate to);
     Map<String, Object> qmtStatus(String traceId);
 }

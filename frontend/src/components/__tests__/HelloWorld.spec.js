@@ -1,11 +1,14 @@
-import { describe, it, expect } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { sanitizeData, validateData } from '../../utils/dataTransformers.js'
 
-import { mount } from '@vue/test-utils'
-import HelloWorld from '../HelloWorld.vue'
+describe('data transformers', () => {
+  it('removes null values without changing valid values', () => {
+    expect(sanitizeData({ symbol: '510300.SH', quantity: 0, stale: null }))
+      .toEqual({ symbol: '510300.SH', quantity: 0 })
+  })
 
-describe('HelloWorld', () => {
-  it('renders properly', () => {
-    const wrapper = mount(HelloWorld, { props: { msg: 'Hello Vitest' } })
-    expect(wrapper.text()).toContain('Hello Vitest')
+  it('recognises non-empty API objects', () => {
+    expect(validateData({ dataVersion: '12' }, 'object')).toBe(true)
+    expect(validateData({}, 'object')).toBe(false)
   })
 })

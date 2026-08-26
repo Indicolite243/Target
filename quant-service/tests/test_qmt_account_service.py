@@ -16,6 +16,7 @@ from app.services.qmt_account_service import (
     QmtQueryError,
     QmtSubscriptionError,
 )
+import app.services.qmt_account_service as qmt_account_service
 
 
 ACCOUNT_ID = "62283925"
@@ -182,6 +183,45 @@ def test_qmt_submit_requires_explicit_trade_enablement(tmp_path):
             symbol="510300.SH", side="BUY", orderType="LIMIT", quantity="100",
             price="4.12", environment="SIMULATION",
         ))
+
+
+def test_quotes_wait_for_the_first_tick_after_subscribing(tmp_path, monkeypatch):
+    trader_class = make_trader(positions=[], orders=[], trades=[])
+
+    class FakeXtData:
+        def __init__(self):
+            self.subscriptions = []
+            self.read_count = 0
+
+        def subscribe_quote(self, symbol, period, count):
+            self.subscriptions.append((symbol, period, count))
+
+        def get_full_tick(self, symbols):
+            self.read_count += 1
+            if self.read_count == 1:
+                return {}
+            return {"600000.SH": {"lastPrice": 9.78, "lastClose": 9.6}}
+
+        def get_instrument_detail(self, symbol):
+            return {"InstrumentName": "浦发银行"}
+
+    fake_xtdata = FakeXtData()
+    base_loader = fake_loader(trader_class)
+
+    def loader(name):
+        if name == "xtquant.xtdata":
+            return fake_xtdata
+        return base_loader(name)
+
+    monkeypatch.setattr(qmt_account_service.time, "sleep", lambda _: None)
+    adapter = QmtAccountAdapter(settings(tmp_path), module_loader=loader, session_id=100009)
+
+    result = adapter.quotes(["600000.SH"])
+
+    assert fake_xtdata.subscriptions == [("600000.SH", "1d", 1)]
+    assert fake_xtdata.read_count == 2
+    assert result["quotes"][0]["name"] == "浦发银行"
+    assert result["quotes"][0]["lastPrice"] == "9.7800"
 
 
 def test_qmt_sync_success_maps_all_read_models_and_ignores_request_account(tmp_path):
@@ -496,14 +536,14 @@ def test_health_exposes_top_level_qmt_state_without_secrets(tmp_path, monkeypatc
     assert str(tmp_path) not in str(data)
 
 
-def test_simulation_mode_keeps_mock_sync(tmp_path, monkeypatch):
-    simulation_settings = settings(
-        tmp_path, mode="SIMULATION", internal_token="test-token"
+def test_explicit_test_mock_mode_keeps_mock_sync(tmp_path, monkeypatch):
+    test_mock_settings = settings(
+        tmp_path, mode="TEST_MOCK", internal_token="test-token"
     )
-    app.dependency_overrides[get_settings] = lambda: simulation_settings
+    app.dependency_overrides[get_settings] = lambda: test_mock_settings
 
     def fail_if_called(_):
-        raise AssertionError("QMT adapter must not be used in SIMULATION mode")
+        raise AssertionError("QMT adapter must not be used in TEST_MOCK mode")
 
     monkeypatch.setattr("app.main.get_qmt_adapter", fail_if_called)
     try:
@@ -523,6 +563,46 @@ def test_simulation_mode_keeps_mock_sync(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["data"]["source"] == "mock"
+
+
+def test_live_endpoint_forces_one_portfolio_snapshot_without_orders(tmp_path, monkeypatch):
+    qmt_settings = settings(tmp_path, internal_token="test-token")
+    received = []
+
+    class LiveAdapter:
+        def sync(self, payload):
+            received.append(payload)
+            return {
+                "snapshotTime": "2026-08-25T10:00:00+08:00",
+                "account": {"totalAsset": "100.00", "cash": "20.00", "marketValue": "80.00"},
+                "positions": [],
+                "orders": [],
+                "executions": [],
+                "source": "qmt",
+                "warnings": [],
+            }
+
+    app.dependency_overrides[get_settings] = lambda: qmt_settings
+    monkeypatch.setattr("app.main.get_qmt_adapter", lambda _: LiveAdapter())
+    try:
+        response = TestClient(app).post(
+            "/internal/v1/accounts/live",
+            headers={"X-Internal-Token": "test-token"},
+            json={
+                "accountId": "local-account",
+                "externalAccountId": ACCOUNT_ID,
+                "environment": "SIMULATION",
+                "includePositions": False,
+                "includeOrders": True,
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert received[0].includePositions is True
+    assert received[0].includeOrders is False
+    assert response.json()["data"]["source"] == "qmt"
 
 
 def test_fastapi_lifespan_resets_qmt_singleton(monkeypatch):

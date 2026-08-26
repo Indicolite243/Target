@@ -77,8 +77,7 @@
 
 <script>
 import ExcelJS from 'exceljs'
-import { fetchYearlyComparisonData, fetchAreaComparison } from '@/api/comparisonModuleApi.js'
-import { fetchAccountInfo } from '@/api/accountApi.js'
+import { usePortfolioLiveStore } from '@/store/portfolioLive.js'
 
 export default {
   name: 'ComparisonTable',
@@ -103,14 +102,14 @@ export default {
       regionTableData: [],
       loading: false,
       selectedAccount: '',
-      accounts: [],
+      portfolioLiveStore: usePortfolioLiveStore(),
       timeReturnCalculationMode: 'SNAPSHOT'
     }
   },
-  created() {
-    this.loadAccounts()
-  },
   computed: {
+    accounts() {
+      return this.portfolioLiveStore?.accounts || []
+    },
     tableData() {
       if (this.tableType === 'asset') return this.assetTableData
       if (this.tableType === 'time') return this.timeTableData
@@ -193,71 +192,8 @@ export default {
       processedData.sort((a, b) => Number(b.market_value) - Number(a.market_value))
       this.assetTableData = processedData
     },
-    async loadAccounts() {
-      this.loading = true
-      try {
-        const data = await fetchAccountInfo()
-        if (data?.accounts?.length) {
-          this.accounts = data.accounts
-          if (!this.selectedAccount || !this.accounts.some(a => a.account_id === this.selectedAccount)) {
-            this.selectedAccount = this.accounts[0].account_id
-          }
-          this.$emit('account-changed', this.selectedAccount)
-        }
-      } catch (error) {
-        console.error('获取账户列表失败:', error)
-      } finally {
-        this.loading = false
-      }
-    },
     handleAccountChange() {
       this.$emit('account-changed', this.selectedAccount)
-    },
-    async loadTableData(type, showLoading = true) {
-      if (!this.selectedAccount) return
-      if (showLoading) this.loading = true
-      try {
-        if (type === 'asset') await this.loadAssetData(false)
-        if (type === 'time') await this.loadTimeData()
-        if (type === 'region') await this.loadRegionData()
-      } catch (error) {
-        console.error(`加载${type}表格数据失败:`, error)
-      } finally {
-        if (showLoading) this.loading = false
-      }
-    },
-    async loadAssetData(showLoading = true) {
-      if (showLoading) this.loading = true
-      try {
-        const data = await fetchAccountInfo()
-        if (!data?.accounts?.length) return
-        this.accounts = data.accounts
-        if (!this.selectedAccount) {
-          this.selectedAccount = data.accounts[0].account_id
-        }
-        const account = data.accounts.find(acc => acc.account_id === this.selectedAccount)
-        if (account) this.processAssetData(account)
-      } catch (error) {
-        console.error('获取资产对比表格数据失败:', error)
-      }
-    },
-    async loadTimeData() {
-      try {
-        const data = await fetchYearlyComparisonData(this.selectedAccount, 'mongodb', this.timeGranularity)
-        this.timeTableData = data.yearly_data || []
-      } catch (error) {
-        console.error('获取年度对比表格数据失败:', error)
-        this.timeTableData = []
-      }
-    },
-    async loadRegionData() {
-      try {
-        const data = await fetchAreaComparison(this.selectedAccount)
-        this.regionTableData = data.region_data || []
-      } catch (error) {
-        console.error('获取地区对比表格数据失败:', error)
-        this.regionTableData = []
-      }
     },
     getTableTitle() {
       const titleMap = {

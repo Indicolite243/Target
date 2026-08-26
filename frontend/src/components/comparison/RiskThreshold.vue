@@ -118,8 +118,9 @@ export default {
         mock: '模拟数据',
         qmt_history: 'QMT历史行情',
         qmt_live: 'QMT实时',
-        mongodb: 'MongoDB历史快照',
-        mongodb_history: 'MongoDB历史快照'
+        mysql: 'MySQL最近同步快照',
+        mysql_current: 'MySQL最近同步快照',
+        mysql_account_snapshots: 'MySQL历史快照'
       }
       return labels[source] || source || '--'
     }
