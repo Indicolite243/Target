@@ -1,6 +1,8 @@
 package com.stockmanager.account.controller;
 
 import com.stockmanager.account.service.AccountService;
+import com.stockmanager.account.live.CurrentPortfolioSnapshot;
+import com.stockmanager.account.live.PortfolioLiveService;
 import com.stockmanager.account.vo.AccountSyncView;
 import com.stockmanager.account.vo.AccountView;
 import com.stockmanager.account.vo.PositionView;
@@ -12,15 +14,17 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.Map;
 import java.time.LocalDate;
-import com.stockmanager.account.document.AccountSnapshot;
+import com.stockmanager.account.entity.AccountHistorySnapshot;
 
 @RestController
 @RequestMapping("/api/v1/accounts")
 public class AccountController {
     private final AccountService accountService;
+    private final PortfolioLiveService portfolioLiveService;
 
-    public AccountController(AccountService accountService) {
+    public AccountController(AccountService accountService, PortfolioLiveService portfolioLiveService) {
         this.accountService = accountService;
+        this.portfolioLiveService = portfolioLiveService;
     }
 
     @GetMapping
@@ -44,12 +48,26 @@ public class AccountController {
     public ApiResponse<AccountSyncView> sync(@PathVariable Long accountId, Authentication authentication,
                                              HttpServletRequest request) {
         String traceId = traceId(request);
-        return ApiResponse.success("QMT账户同步完成",
-                accountService.syncAccount(userId(authentication), accountId, traceId), traceId);
+        CurrentPortfolioSnapshot snapshot = portfolioLiveService.refresh(userId(authentication), accountId, traceId);
+        return ApiResponse.success("QMT账户同步完成", toSyncView(snapshot), traceId);
+    }
+
+    @GetMapping("/{accountId}/live")
+    public ApiResponse<CurrentPortfolioSnapshot> live(@PathVariable Long accountId, Authentication authentication,
+                                                       HttpServletRequest request) {
+        return ApiResponse.success(portfolioLiveService.current(userId(authentication), accountId), traceId(request));
+    }
+
+    @PostMapping("/{accountId}/refresh")
+    public ApiResponse<CurrentPortfolioSnapshot> refresh(@PathVariable Long accountId, Authentication authentication,
+                                                          HttpServletRequest request) {
+        String traceId = traceId(request);
+        return ApiResponse.success("QMT实时组合已刷新",
+                portfolioLiveService.refresh(userId(authentication), accountId, traceId), traceId);
     }
 
     @GetMapping("/{accountId}/snapshots")
-    public ApiResponse<List<AccountSnapshot>> snapshots(@PathVariable Long accountId,
+    public ApiResponse<List<AccountHistorySnapshot>> snapshots(@PathVariable Long accountId,
                                                         @RequestParam(required = false) LocalDate from,
                                                         @RequestParam(required = false) LocalDate to,
                                                         Authentication authentication,
@@ -70,5 +88,10 @@ public class AccountController {
 
     private String traceId(HttpServletRequest request) {
         return String.valueOf(request.getAttribute("traceId"));
+    }
+
+    private AccountSyncView toSyncView(CurrentPortfolioSnapshot snapshot) {
+        return new AccountSyncView(snapshot.account(), snapshot.positions(), snapshot.source().toLowerCase(),
+                snapshot.snapshotTime(), snapshot.warnings());
     }
 }

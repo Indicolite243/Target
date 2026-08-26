@@ -8,9 +8,9 @@ import com.stockmanager.account.mapper.PositionMapper;
 import com.stockmanager.analysis.service.AccountSnapshotHistoryService;
 import com.stockmanager.common.exception.BusinessException;
 import com.stockmanager.integration.quant.QuantClient;
-import com.stockmanager.risk.document.RiskAssessment;
-import com.stockmanager.risk.repository.RiskAssessmentRepository;
+import com.stockmanager.risk.service.RiskAssessmentPersistenceService;
 import com.stockmanager.risk.service.RiskAssessmentService;
+import com.stockmanager.risk.vo.RiskAssessmentView;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -27,28 +27,28 @@ public class RiskAssessmentServiceImpl implements RiskAssessmentService {
     private final AccountMapper accountMapper;
     private final PositionMapper positionMapper;
     private final QuantClient quantClient;
-    private final RiskAssessmentRepository repository;
+    private final RiskAssessmentPersistenceService persistenceService;
     private final AccountSnapshotHistoryService snapshotHistoryService;
 
     public RiskAssessmentServiceImpl(AccountMapper accountMapper, PositionMapper positionMapper,
-                                     QuantClient quantClient, RiskAssessmentRepository repository,
+                                     QuantClient quantClient, RiskAssessmentPersistenceService persistenceService,
                                      AccountSnapshotHistoryService snapshotHistoryService) {
         this.accountMapper = accountMapper;
         this.positionMapper = positionMapper;
         this.quantClient = quantClient;
-        this.repository = repository;
+        this.persistenceService = persistenceService;
         this.snapshotHistoryService = snapshotHistoryService;
     }
 
     @Override
-    public RiskAssessment calculate(Long userId, Long accountId, int days, String traceId) {
+    public RiskAssessmentView calculate(Long userId, Long accountId, int days, String traceId) {
         LocalDate end = LocalDate.now();
         return calculateForRange(userId, accountId, end.minusDays(Math.max(days, 2)), end, "DAILY", traceId);
     }
 
     @Override
-    public RiskAssessment latestOrCalculate(Long userId, Long accountId, int days,
-                                            String startDate, String endDate, String granularity, String traceId) {
+    public RiskAssessmentView latestOrCalculate(Long userId, Long accountId, int days,
+                                                String startDate, String endDate, String granularity, String traceId) {
         LocalDate end = parseDate(endDate, LocalDate.now());
         LocalDate start = parseDate(startDate, end.minusDays(Math.max(days, 2)));
         if (start.isAfter(end)) {
@@ -59,8 +59,8 @@ public class RiskAssessmentServiceImpl implements RiskAssessmentService {
         return calculateForRange(userId, accountId, start, end, granularity, traceId);
     }
 
-    private RiskAssessment calculateForRange(Long userId, Long accountId, LocalDate start,
-                                             LocalDate end, String granularity, String traceId) {
+    private RiskAssessmentView calculateForRange(Long userId, Long accountId, LocalDate start,
+                                                  LocalDate end, String granularity, String traceId) {
         Account account = requireAccount(userId, accountId);
         String mode = "ALL".equalsIgnoreCase(granularity) ? "ALL" : "DAILY";
         Map<String, Object> history = snapshotHistoryService.portfolioHistory(accountId, start, end, mode);
@@ -70,7 +70,7 @@ public class RiskAssessmentServiceImpl implements RiskAssessmentService {
                     HttpStatus.UNPROCESSABLE_ENTITY);
         }
 
-        String dataVersion = "mongodb-snapshot-" + mode.toLowerCase() + "-" + accountId + "-" + start + "-" + end;
+        String dataVersion = "mysql-snapshot-" + mode.toLowerCase() + "-" + accountId + "-" + start + "-" + end;
         Map<String, Object> result = quantClient.calculateRisk(Map.of(
                 "accountId", String.valueOf(accountId),
                 "dataVersion", dataVersion,
@@ -108,21 +108,11 @@ public class RiskAssessmentServiceImpl implements RiskAssessmentService {
             default -> "当前风险较低，可继续维持现有仓位结构。";
         };
 
-        RiskAssessment assessment = new RiskAssessment();
-        assessment.setAccountId(accountId);
-        assessment.setRiskScore(String.valueOf(score));
-        assessment.setRiskLevel(level);
-        assessment.setMetrics(metrics);
-        assessment.setRecommendations(List.of(recommendation));
-        assessment.setSample(castMap(result.getOrDefault("sample", Map.of())));
-        assessment.setDataVersion(dataVersion);
-        assessment.setRuleVersion(1);
-        assessment.setAlgorithmVersion("risk-v2.0.0");
-        assessment.setEnvironment(account.getEnvironment());
-        assessment.setDataSource(String.valueOf(history.getOrDefault("source", "qmt_history")));
-        assessment.setWarnings(stringList(history.get("warnings")));
-        assessment.setCalculatedAt(LocalDateTime.now());
-        return repository.save(assessment);
+        return persistenceService.save(accountId, start, end, level, BigDecimal.valueOf(score), metrics,
+                List.of(recommendation), castMap(result.getOrDefault("sample", Map.of())), dataVersion, 1,
+                "risk-v2.0.0", account.getEnvironment(),
+                String.valueOf(history.getOrDefault("source", "mysql_account_snapshots")),
+                stringList(history.get("warnings")), LocalDateTime.now());
     }
 
     private Account requireAccount(Long userId, Long accountId) {

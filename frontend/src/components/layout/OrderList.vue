@@ -8,9 +8,42 @@
       @change="handleCsvRead"
     />
 
+    <div class="order-toolbar">
+      <el-input v-model="keyword" clearable placeholder="代码 / 名称 / 订单号" class="order-search" />
+      <el-date-picker
+        v-model="dateRange"
+        type="daterange"
+        value-format="YYYY-MM-DD"
+        range-separator="至"
+        start-placeholder="开始日期"
+        end-placeholder="结束日期"
+        class="order-date-range"
+        @change="handleDateChange"
+      />
+      <div class="quick-dates">
+        <el-button size="small" :class="{ active: datePreset === 'today' }" @click="setDatePreset('today')">今天</el-button>
+        <el-button size="small" :class="{ active: datePreset === '7d' }" @click="setDatePreset('7d')">近7天</el-button>
+        <el-button size="small" :class="{ active: datePreset === '30d' }" @click="setDatePreset('30d')">近30天</el-button>
+      </div>
+      <el-radio-group v-model="activeStatus" size="small" class="status-tabs">
+        <el-radio-button label="ALL">全部</el-radio-button>
+        <el-radio-button label="PENDING">待成交</el-radio-button>
+        <el-radio-button label="DONE">已成</el-radio-button>
+        <el-radio-button label="CANCELLED">已撤</el-radio-button>
+      </el-radio-group>
+      <div class="order-counts">待成交 {{ pendingCount }} · 已成 {{ completedCount }} · 已撤 {{ cancelledCount }}</div>
+      <el-button class="delete-btn" :disabled="selectedRows.length === 0" :loading="deleting" @click="deleteSelected">
+        删除选中
+      </el-button>
+      <el-button class="clear-history-btn" :disabled="filteredOrderList.length === 0" :loading="deleting" @click="deleteFiltered">
+        清空当前筛选
+      </el-button>
+      <el-button class="refresh-btn" :loading="loading" @click="refreshOrders">↻ 刷新</el-button>
+    </div>
+
     <div class="table-container">
       <el-table
-        :data="orderList"
+        :data="filteredOrderList"
         border
         stripe
         style="width: 100%"
@@ -18,7 +51,10 @@
         :header-cell-style="headerStyle"
         :cell-style="cellStyle"
         :row-class-name="tableRowClassName"
+        row-key="order_key"
+        @selection-change="handleSelectionChange"
       >
+        <el-table-column type="selection" width="42" align="center" reserve-selection :selectable="isRowSelectable" />
         <el-table-column type="index" label="序号" width="60" align="center" />
         <el-table-column prop="entrust_time" label="委托时间" min-width="100" align="center" />
         <el-table-column prop="stock_code" label="证券代码" min-width="110" align="center" />
@@ -34,7 +70,7 @@
         </el-table-column>
         <el-table-column prop="status" label="委托状态" min-width="110" align="center">
           <template #default="scope">
-            <el-tag :type="statusType(scope.row.status)">
+            <el-tag class="status-tag" :type="statusType(scope.row.status)">
               {{ formatValue(scope.row.status) }}
             </el-tag>
           </template>
@@ -63,67 +99,103 @@
         <el-table-column label="操作" width="110" align="center">
           <template #default="scope">
             <el-button
+              v-if="canCancel(scope.row)"
               size="small"
-              type="danger"
+              class="cancel-btn"
               :loading="isCancelling(scope.row)"
               :disabled="isCancelling(scope.row)"
               @click="cancelOrder(scope.row)"
             >
               撤单
             </el-button>
+            <el-button
+              v-else-if="canDelete(scope.row)"
+              size="small"
+              class="delete-row-btn"
+              :loading="isDeleting(scope.row)"
+              :disabled="isDeleting(scope.row)"
+              @click="deleteOne(scope.row)"
+            >
+              删除
+            </el-button>
+            <span v-else class="operation-placeholder">—</span>
           </template>
         </el-table-column>
       </el-table>
     </div>
 
-    <div class="sum-result">
-      <el-button 
-      type="primary" 
-      :loading="loading"
-       @click="refreshOrders"
-       style="color: #ffffff; 
-       background-color: #2c3e50; 
-       border-color: #2c3e50;">
-       刷新委托
-       </el-button>
-    </div>
+    <div class="order-footer">共 {{ filteredOrderList.length }} 条委托 <span>进行中委托仅可撤单，终态委托可删除</span></div>
   </div>
 </template>
 
 <script setup>
 import { computed, ref, onBeforeUnmount, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchOrderList, cancelOrder as cancelOrderApi, fetchGuojinSimQuote } from '@/api/accountApi.js'
+import {
+  fetchOrderList,
+  cancelOrder as cancelOrderApi,
+  deleteOrderHistory,
+  deleteFilteredOrderHistory,
+  fetchGuojinSimQuote
+} from '@/api/accountApi.js'
 
 const csvFileInput = ref(null)
 const rowHeight = 40
 const maxVisibleRows = 5
 const tableHeaderHeight = 52
 const orderList = ref([])
+const orderTable = ref(null)
 const loading = ref(false)
 const cancellingRows = ref(new Set())
+const deletingRows = ref(new Set())
+const deleting = ref(false)
+const selectedRows = ref([])
+const keyword = ref('')
+const activeStatus = ref('ALL')
+const dateRange = ref([])
+const datePreset = ref('')
+let orderRefreshTimer = null
 
 const headerStyle = () => ({
-  backgroundColor: 'rgba(64, 224, 255, 0.2)',
-  color: '#000000',
+  backgroundColor: 'rgba(24, 61, 94, 0.82)',
+  color: '#9fe7ff',
   fontWeight: 'bold',
   padding: '4px 0',
   textAlign: 'center',
-  borderBottom: '1px solid rgba(64, 224, 255, 0.3)',
+  borderBottom: '1px solid rgba(64, 224, 255, 0.24)',
   fontSize: '12px'
 })
 
 const cellStyle = ({ column }) => ({
   padding: '4px 0',
   textAlign: column.align || 'center',
-  color: '#000000',
+  color: '#d5e8f7',
   backgroundColor: 'transparent',
-  borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+  borderBottom: '1px solid rgba(100, 177, 231, 0.13)',
   fontSize: '12px'
 })
 
 const tableRowClassName = ({ rowIndex }) => (rowIndex % 2 === 0 ? 'even-row' : '')
-const tableMaxHeight = computed(() => `${Math.min(orderList.value.length, maxVisibleRows) * rowHeight + tableHeaderHeight}px`)
+const isPendingStatus = (status) => ['已报', '部分成交', '状态确认中'].includes(String(status || '').trim())
+const isCompletedStatus = (status) => ['已成', '全部成交'].includes(String(status || '').trim())
+const isCancelledStatus = (status) => String(status || '').includes('撤')
+const pendingCount = computed(() => orderList.value.filter((row) => isPendingStatus(row.status)).length)
+const completedCount = computed(() => orderList.value.filter((row) => isCompletedStatus(row.status)).length)
+const cancelledCount = computed(() => orderList.value.filter((row) => isCancelledStatus(row.status)).length)
+const filteredOrderList = computed(() => {
+  const query = keyword.value.trim().toLowerCase()
+  return orderList.value.filter((row) => {
+    const status = row.status
+    const matchesStatus = activeStatus.value === 'ALL'
+      || (activeStatus.value === 'PENDING' && isPendingStatus(status))
+      || (activeStatus.value === 'DONE' && isCompletedStatus(status))
+      || (activeStatus.value === 'CANCELLED' && isCancelledStatus(status))
+    if (!matchesStatus) return false
+    if (!query) return true
+    return [row.stock_code, row.stock_name, row.contract_no].some((item) => String(item || '').toLowerCase().includes(query))
+  })
+})
+const tableMaxHeight = computed(() => `${Math.min(filteredOrderList.value.length, maxVisibleRows) * rowHeight + tableHeaderHeight}px`)
 
 const statusType = (status) => {
   const text = String(status || '')
@@ -152,6 +224,21 @@ const formatTimeOnly = (value) => {
 const normalizeStatus = (value, order = {}) => {
   const text = String(value ?? '').trim()
   const mapping = {
+    PENDING_SUBMIT: '提交中',
+    SUBMITTED: '已报',
+    UNREPORTED: '未报',
+    WAIT_REPORTING: '待报',
+    REPORTED: '已报',
+    REPORTED_CANCEL: '已报待撤',
+    PARTIALLY_FILLED_CANCEL_PENDING: '部分成交待撤',
+    PARTIALLY_CANCELED: '部分撤单',
+    PARTIALLY_FILLED: '部分成交',
+    CANCEL_PENDING: '撤单确认中',
+    CANCELED: '已撤',
+    FILLED: '已成',
+    REJECTED: '已拒绝',
+    FAILED: '失败',
+    UNKNOWN: '状态确认中',
     '0': '未报',
     '1': '待报',
     '2': '已报',
@@ -231,7 +318,8 @@ const normalizeOrder = (order) => {
   return {
     account_id: order.account_id ?? '--',
     market: normalizeMarket(order.market ?? order.exchange ?? order.stock_code),
-    order_id: toIntOrNull(orderIdRaw),
+    // MyBatis Snowflake IDs exceed JavaScript's safe Number range: preserve the exact string for cancel requests.
+    order_id: normalizeOrderId(orderIdRaw),
     entrust_time: formatTimeOnly(order.entrust_time ?? order.createdAt),
     stock_code: normalizeStockCode(order.stock_code ?? order.symbol ?? '--'),
     stock_name: formatStockName(order.stock_name ?? order.securityName, order.stock_code ?? order.symbol),
@@ -243,7 +331,8 @@ const normalizeOrder = (order) => {
     entrust_price: normalizePrice(entrustPrice),
     deal_avg_price: dealAvg !== null ? normalizePrice(dealAvg) : '--',
     frozen_amount: frozenAmount !== null ? normalizePrice(frozenAmount) : '0.00',
-    contract_no: formatContractNo(contractNoRaw)
+    contract_no: formatContractNo(contractNoRaw),
+    order_key: normalizeOrderId(orderIdRaw) || formatContractNo(contractNoRaw)
   }
 }
 
@@ -325,10 +414,70 @@ async function resolveOrderStockName(order) {
   return formatStockName('', order.stock_code)
 }
 
+function buildOrderQuery() {
+  const query = {}
+  if (Array.isArray(dateRange.value) && dateRange.value.length === 2) {
+    query.start_date = dateRange.value[0]
+    query.end_date = dateRange.value[1]
+  }
+  return query
+}
+
+function formatDateInput(date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function setDatePreset(preset) {
+  datePreset.value = preset
+  const end = new Date()
+  const start = new Date(end)
+  if (preset === '7d') start.setDate(start.getDate() - 6)
+  if (preset === '30d') start.setDate(start.getDate() - 29)
+  dateRange.value = [formatDateInput(start), formatDateInput(end)]
+  clearSelectedRows()
+  refreshOrders()
+}
+
+function handleDateChange() {
+  datePreset.value = ''
+  clearSelectedRows()
+  refreshOrders()
+}
+
+function handleSelectionChange(rows) {
+  selectedRows.value = rows
+}
+
+function clearSelectedRows() {
+  selectedRows.value = []
+  orderTable.value?.clearSelection()
+}
+
+function isDeletableStatus(status) {
+  return ['已成', '全部成交', '已撤', '已拒绝', '失败', '废单'].includes(String(status || '').trim())
+}
+
+function canDelete(row) {
+  return Boolean(row?.order_id) && !canCancel(row) && isDeletableStatus(row.status)
+}
+
+function isRowSelectable(row) {
+  return canDelete(row)
+}
+
+function isDeleting(row) {
+  const key = String(row?.order_id || row?.contract_no || '')
+  return deletingRows.value.has(key)
+}
+
 async function refreshOrders() {
+  if (loading.value) return
   loading.value = true
   try {
-    const response = await fetchOrderList()
+    const response = await fetchOrderList(buildOrderQuery())
     const payload = response || {}
     const orders = payload.data?.items || payload.data?.orders || payload.orders || []
     const normalizedOrders = Array.isArray(orders) ? orders.map(normalizeOrder) : []
@@ -350,17 +499,116 @@ async function refreshOrders() {
   }
 }
 
+async function deleteOne(row) {
+  if (!canDelete(row)) return
+  const orderId = normalizeOrderId(row.order_id)
+  try {
+    await ElMessageBox.confirm(`确认从历史记录中删除 ${row.contract_no || orderId} 吗？此操作不会撤销券商委托。`, '删除委托记录', {
+      confirmButtonText: '确认删除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
+
+  const key = String(orderId)
+  deletingRows.value = new Set(deletingRows.value).add(key)
+  try {
+    const result = await deleteOrderHistory(orderId)
+    if (result?.success === false) {
+      ElMessage.error(result?.message || '删除委托记录失败')
+      return
+    }
+    ElMessage.success('委托记录已删除')
+    clearSelectedRows()
+    await refreshOrders()
+  } catch (error) {
+    console.error('删除委托记录失败：', error)
+    ElMessage.error(error?.response?.data?.message || '删除委托记录失败')
+  } finally {
+    const next = new Set(deletingRows.value)
+    next.delete(key)
+    deletingRows.value = next
+  }
+}
+
+async function deleteSelected() {
+  const rows = selectedRows.value.filter(canDelete)
+  if (!rows.length || deleting.value) return
+  try {
+    await ElMessageBox.confirm(`确认删除选中的 ${rows.length} 条终态委托记录吗？此操作不会撤单。`, '批量删除委托记录', {
+      confirmButtonText: '确认删除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
+  deleting.value = true
+  try {
+    const results = await Promise.all(rows.map((row) => deleteOrderHistory(row.order_id)))
+    const failed = results.filter((item) => item?.success === false)
+    if (failed.length) ElMessage.warning(`${rows.length - failed.length} 条已删除，${failed.length} 条删除失败`)
+    else ElMessage.success(`已删除 ${rows.length} 条委托记录`)
+    clearSelectedRows()
+    await refreshOrders()
+  } catch (error) {
+    console.error('批量删除委托记录失败：', error)
+    ElMessage.error(error?.response?.data?.message || '批量删除委托记录失败')
+  } finally {
+    deleting.value = false
+  }
+}
+
+async function deleteFiltered() {
+  if (!filteredOrderList.value.length || deleting.value) return
+  const rangeText = dateRange.value?.length === 2 ? `${dateRange.value[0]} 至 ${dateRange.value[1]}` : '当前全部日期'
+  try {
+    await ElMessageBox.confirm(`确认删除 ${rangeText} 内的终态委托记录吗？进行中的委托不会被删除，也不会撤单。`, '清空当前筛选', {
+      confirmButtonText: '确认清空',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
+  deleting.value = true
+  try {
+    const result = await deleteFilteredOrderHistory(buildOrderQuery())
+    if (result?.success === false) {
+      ElMessage.error(result?.message || '清空委托记录失败')
+      return
+    }
+    const count = Number(result?.data?.deleted ?? result?.deleted ?? 0)
+    ElMessage.success(count ? `已清空 ${count} 条终态委托记录` : '当前筛选没有可删除的终态记录')
+    clearSelectedRows()
+    await refreshOrders()
+  } catch (error) {
+    console.error('清空委托记录失败：', error)
+    ElMessage.error(error?.response?.data?.message || '清空委托记录失败')
+  } finally {
+    deleting.value = false
+  }
+}
+
 function isCancelling(row) {
   const contractNo = String(row.contract_no || '').trim()
-  const orderId = Number(row.order_id ?? row.orderId ?? row.order_no ?? row.orderNo ?? row.id)
-  return cancellingRows.value.has(contractNo || String(orderId))
+  const orderId = normalizeOrderId(row.order_id ?? row.orderId ?? row.order_no ?? row.orderNo ?? row.id)
+  return cancellingRows.value.has(contractNo || orderId || '')
+}
+
+// Keep the UI aligned with the backend/QMT lifecycle: only an accepted,
+// unfilled or partially filled order may be withdrawn.
+function canCancel(row) {
+  return isPendingStatus(row.status)
 }
 
 async function cancelOrder(row) {
   const contractNo = String(row.contract_no || '').trim()
-  const orderId = Number(row.order_id ?? row.orderId ?? row.order_no ?? row.orderNo ?? row.id)
+  const orderId = normalizeOrderId(row.order_id ?? row.orderId ?? row.order_no ?? row.orderNo ?? row.id)
 
-  if (!contractNo && !Number.isFinite(orderId)) {
+  if (!contractNo && !orderId) {
     ElMessage.warning('订单缺少合同编号或订单编号，无法撤单')
     return
   }
@@ -375,13 +623,13 @@ async function cancelOrder(row) {
     return
   }
 
-  const cancelKey = contractNo || String(orderId)
+  const cancelKey = contractNo || orderId
   cancellingRows.value.add(cancelKey)
   try {
     const result = await cancelOrderApi({
       account_id: row.account_id,
       contract_no: contractNo,
-      order_id: Number.isFinite(orderId) ? orderId : undefined,
+      order_id: orderId || undefined,
       order_sysid: contractNo || undefined,
       market: row.market,
       stock_code: row.stock_code,
@@ -414,17 +662,19 @@ function normalizeMarket(value) {
   return Number.isFinite(num) ? num : null
 }
 
-function toIntOrNull(value) {
-  const num = Number(value)
-  return Number.isFinite(num) ? Math.trunc(num) : null
+function normalizeOrderId(value) {
+  const text = String(value ?? '').trim()
+  return text && text !== 'null' && text !== 'undefined' ? text : null
 }
 
 onMounted(() => {
   refreshOrders()
+  orderRefreshTimer = window.setInterval(refreshOrders, 3000)
   window.addEventListener('qmt-order-submitted', refreshOrders)
 })
 
 onBeforeUnmount(() => {
+  if (orderRefreshTimer) window.clearInterval(orderRefreshTimer)
   window.removeEventListener('qmt-order-submitted', refreshOrders)
 })
 </script>
@@ -432,39 +682,85 @@ onBeforeUnmount(() => {
 <style scoped>
 .module-card {
   width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  color: #dcecff;
+  font-variant-numeric: tabular-nums;
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-row-hover-bg-color: rgba(31, 91, 128, .3);
+  --el-table-header-bg-color: rgba(24, 61, 94, .92);
+  --el-table-border-color: rgba(100, 177, 231, .16);
+  --el-fill-color-lighter: rgba(255, 255, 255, .025);
 }
+
+.order-overview { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.overview-card {
+  appearance: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-height: 42px;
+  padding: 7px 11px;
+  border: 1px solid rgba(64, 224, 255, .2);
+  border-radius: 6px;
+  background: linear-gradient(135deg, rgba(21, 61, 99, .72), rgba(13, 30, 54, .8));
+  color: #b5d0e7;
+  cursor: pointer;
+  text-align: left;
+}
+.overview-card:hover, .overview-card.active { border-color: #2fbde9; box-shadow: inset 0 0 18px rgba(37, 188, 233, .11); }
+.overview-card strong { color: #49d9ff; font-size: 21px; line-height: 1; }
+.overview-card.done { background: linear-gradient(135deg, rgba(17, 78, 66, .62), rgba(11, 38, 47, .8)); }
+.overview-card.done strong { color: #44dd94; }
+.overview-card.cancelled { background: linear-gradient(135deg, rgba(63, 76, 96, .58), rgba(22, 30, 47, .82)); }
+.overview-card.cancelled strong { color: #9db0c3; }
+.order-toolbar { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+.order-search { width: 180px; flex: 0 1 180px; }
+.order-date-range { width: 238px; flex: 0 1 238px; }
+.quick-dates { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.quick-dates .el-button { margin-left: 0; min-width: 40px; padding: 5px 7px; color: #9ebbd0; border-color: rgba(100, 177, 231, .28); background: rgba(11, 31, 57, .76); }
+.quick-dates .el-button:hover, .quick-dates .el-button.active { color: #fff; border-color: #2fbde9; background: rgba(23, 100, 189, .82); }
+.order-counts { margin-left: auto; color: #7194af; font-size: 11px; white-space: nowrap; }
+.delete-btn, .clear-history-btn { color: #e2bd9c; border-color: rgba(226, 145, 95, .4); background: rgba(104, 54, 34, .3); }
+.delete-btn:hover, .delete-btn:focus, .clear-history-btn:hover, .clear-history-btn:focus { color: #fff; border-color: #e89863; background: rgba(157, 77, 44, .78); }
+.delete-btn.is-disabled, .clear-history-btn.is-disabled { color: #637b8d; border-color: rgba(100, 125, 144, .2); background: rgba(22, 35, 52, .55); }
+.refresh-btn { margin-left: 0; color: #a9daef; border-color: rgba(64, 224, 255, .36); background: rgba(15, 58, 85, .62); }
+.refresh-btn:hover, .refresh-btn:focus { color: #fff; border-color: #2fc4ee; background: rgba(25, 106, 148, .75); }
+.status-tabs { min-width: 0; white-space: nowrap; }
+.order-footer { color: #7e9ab4; font-size: 11px; text-align: right; }
+.order-footer span { margin-left: 14px; color: #68879f; }
 
 .table-container {
   width: 100%;
   display: inline-block;
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(7, 20, 39, 0.68);
   backdrop-filter: blur(10px);
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.sum-result {
-  text-align: right;
-  font-size: 14px;
-  padding: 8px 12px 0;
+  border-radius: 7px;
+  border: 1px solid rgba(64, 224, 255, 0.18);
 }
 
 :deep(.el-table) {
   background: transparent !important;
+  color: #d5e8f7 !important;
 }
+:deep(.el-table__inner-wrapper), :deep(.el-table__body-wrapper), :deep(.el-scrollbar__view), :deep(.el-table tr) { background: #091a31 !important; }
+:deep(.el-table__inner-wrapper::before) { background-color: rgba(100, 177, 231, .18) !important; }
 
 :deep(.el-table th.el-table__cell) {
-  background-color: rgba(64, 224, 255, 0.2) !important;
-  color: #000000 !important;
-  border-bottom: 1px solid rgba(64, 224, 255, 0.3) !important;
+  background-color: rgba(24, 61, 94, .82) !important;
+  color: #9fe7ff !important;
+  border-bottom: 1px solid rgba(64, 224, 255, .24) !important;
   font-weight: bold !important;
 }
 
 :deep(.el-table td.el-table__cell) {
   background-color: transparent !important;
-  color: #000000 !important;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
+  color: #d5e8f7 !important;
+  border-bottom: 1px solid rgba(100, 177, 231, .13) !important;
 }
 
 :deep(.el-table .el-table__body-wrapper) {
@@ -472,8 +768,26 @@ onBeforeUnmount(() => {
 }
 
 :deep(.el-table tr.even-row td) {
-  background-color: rgba(255, 255, 255, 0.05) !important;
+  background-color: rgba(21, 43, 67, .78) !important;
 }
+:deep(.el-table tr:not(.even-row) td) { background-color: rgba(8, 25, 47, .92) !important; }
+
+:deep(.order-search .el-input__wrapper) { background: rgba(7, 21, 41, .86); box-shadow: 0 0 0 1px rgba(100, 177, 231, .34) inset; }
+:deep(.order-search .el-input__inner) { color: #e6f5ff; }
+:deep(.status-tabs .el-radio-button__inner) { background: rgba(11, 31, 57, .9); border-color: rgba(100, 177, 231, .35); color: #afcde3; box-shadow: none; }
+:deep(.status-tabs .el-radio-button.is-active .el-radio-button__inner) { background: #1764bd; border-color: #299ee0; color: #fff; box-shadow: none; }
+:deep(.status-tag) {
+  border-color: transparent;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: .3px;
+  text-shadow: 0 0 1px currentColor;
+}
+.cancel-btn { color: #ff9f94; border-color: rgba(255, 110, 100, .55); background: rgba(110, 31, 40, .25); }
+.cancel-btn:hover, .cancel-btn:focus { color: #fff; border-color: #ff7068; background: #bf4645; }
+.delete-row-btn { color: #f2c19d; border-color: rgba(232, 152, 99, .5); background: rgba(105, 57, 36, .25); }
+.delete-row-btn:hover, .delete-row-btn:focus { color: #fff; border-color: #e89863; background: #a95d3c; }
+.operation-placeholder { color: #62788c; }
 
 .buy-text {
   color: #ff4d4f;
@@ -483,5 +797,18 @@ onBeforeUnmount(() => {
 .sell-text {
   color: #2ecc71;
   font-weight: 700;
+}
+
+:deep(.order-date-range .el-input__wrapper) { background: rgba(7, 21, 41, .86); box-shadow: 0 0 0 1px rgba(100, 177, 231, .34) inset; }
+:deep(.order-date-range .el-range-input) { color: #111827 !important; font-weight: 600; }
+:deep(.order-date-range .el-range-separator), :deep(.order-date-range .el-input__icon) { color: #5f7180; }
+:deep(.el-table-column--selection .el-checkbox__inner) { border-color: rgba(100, 177, 231, .58); background: rgba(9, 27, 48, .88); }
+:deep(.el-table-column--selection .el-checkbox__input.is-checked .el-checkbox__inner), :deep(.el-table-column--selection .el-checkbox__input.is-indeterminate .el-checkbox__inner) { border-color: #2fbde9; background: #1764bd; }
+
+@media (max-width: 1280px) {
+  .order-toolbar { flex-wrap: wrap; }
+  .order-search { flex-basis: 100%; width: 100%; }
+  .order-date-range { flex: 1 1 210px; width: auto; }
+  .refresh-btn { margin-left: 0; }
 }
 </style>

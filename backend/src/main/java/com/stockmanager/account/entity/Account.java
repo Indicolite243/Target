@@ -24,5 +24,6 @@ public class Account {
     private BigDecimal marketValue;
     private BigDecimal profitLoss;
     private LocalDateTime lastSyncTime;
+    private Long dataVersion;
     private String status;
 }

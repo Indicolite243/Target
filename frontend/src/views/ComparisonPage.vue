@@ -35,17 +35,8 @@
                 数据可视化
               </h4>
               <div class="header-tools">
-                <el-select v-model="pendingComparisonDataSource" size="small" style="width: 140px">
-                  <el-option label="QMT实时" value="qmt" />
-                  <el-option label="MongoDB缓存" value="mongodb" />
-                </el-select>
-                <el-button
-                  size="small"
-                  type="primary"
-                  :disabled="pendingComparisonDataSource === comparisonDataSource"
-                  @click="confirmComparisonSourceChange"
-                >
-                  确认
+                <el-button size="small" type="primary" :loading="portfolioLiveStore?.refreshing" @click="manualRefreshLive">
+                  立即刷新
                 </el-button>
                 <span class="source-state">{{ comparisonStatusText }}</span>
                 <el-tooltip
@@ -185,9 +176,9 @@ import RiskThreshold from '@/components/comparison/RiskThreshold.vue'
 import ComparisonTable from '@/components/comparison/ComparisonTable.vue'
 import RiskWarning from '@/components/comparison/RiskWarning.vue'
 import { fetchRiskAssessment } from '@/api/riskThresholdApi.js'
-import { fetchAssetComparison, fetchYearlyComparisonData, fetchAreaComparison } from '@/api/comparisonModuleApi.js'
-import { fetchAccountInfo } from '@/api/accountApi.js'
+import { fetchYearlyComparisonData, fetchAreaComparison } from '@/api/comparisonModuleApi.js'
 import { useAccountStore } from '@/store'
+import { usePortfolioLiveStore } from '@/store/portfolioLive.js'
 
 export default {
   name: 'ComparisonPage',
@@ -195,8 +186,6 @@ export default {
   data() {
     return {
       activeMenu: 'asset',
-      comparisonDataSource: 'qmt',
-      pendingComparisonDataSource: 'qmt',
       timeGranularity: 'DAILY',
       timeReturnMode: 'SNAPSHOT',
       comparisonSourceMeta: {
@@ -211,7 +200,9 @@ export default {
       riskDateRange: [],
       pendingRiskDateRange: [],
       riskGranularity: 'DAILY',
-      refreshTimer: null,
+      portfolioLiveStore: null,
+      portfolioUnsubscribe: null,
+      lastLiveDataVersion: null,
       riskWarnings: [
         {
           level: 'normal',
@@ -224,35 +215,39 @@ export default {
   },
   async mounted() {
     const accountStore = useAccountStore()
-    this.currentAccountId = accountStore.selectedAccountId || ''
+    this.portfolioLiveStore = usePortfolioLiveStore()
+    try {
+      await this.portfolioLiveStore.initialize()
+    } catch (error) {
+      console.error('初始化实时组合失败:', error)
+    }
+    this.currentAccountId = this.portfolioLiveStore.selectedAccountId || accountStore.selectedAccountId || ''
     if (!this.currentAccountId) {
-      try {
-        const accountData = await fetchAccountInfo()
-        const firstAccountId = accountData?.accounts?.[0]?.account_id || ''
-        if (firstAccountId) {
-          this.currentAccountId = firstAccountId
-          accountStore.setSelectedAccountId(firstAccountId)
-        }
-      } catch (error) {
-        console.error('初始化对比评估账户失败:', error)
+      const firstAccountId = this.portfolioLiveStore.accounts[0]?.account_id || ''
+      if (firstAccountId) {
+        this.currentAccountId = firstAccountId
+        accountStore.setSelectedAccountId(firstAccountId)
       }
     }
-    this.pendingComparisonDataSource = this.comparisonDataSource
     this.initializeRiskDateRange()
     await this.loadRiskThresholdData()
     this.refreshAllData()
     this.startRefreshTimer()
+    this.portfolioUnsubscribe = this.portfolioLiveStore.$subscribe((_mutation, state) => {
+      const snapshot = state.snapshot
+      if (!snapshot || snapshot.dataVersion === this.lastLiveDataVersion) return
+      this.lastLiveDataVersion = snapshot.dataVersion
+      this.currentAccountId = String(snapshot.accountId || this.currentAccountId)
+      if (this.activeMenu === 'asset') this.refreshAllData()
+    })
   },
   beforeUnmount() {
     this.stopRefreshTimer()
+    if (this.portfolioUnsubscribe) this.portfolioUnsubscribe()
   },
   methods: {
     startRefreshTimer() {
-      if (this.refreshTimer) return
-      this.refreshTimer = setInterval(() => {
-        if (this.comparisonDataSource !== 'qmt') return
-        this.refreshAllData()
-      }, 5000)
+      this.portfolioLiveStore?.startPolling()
     },
     initializeRiskDateRange() {
       const end = new Date()
@@ -293,20 +288,22 @@ export default {
       await this.loadRiskThresholdData(this.currentAccountId)
     },
     stopRefreshTimer() {
-      if (this.refreshTimer) {
-        clearInterval(this.refreshTimer)
-        this.refreshTimer = null
-      }
+      this.portfolioLiveStore?.stopPolling()
     },
-    async confirmComparisonSourceChange() {
-      if (this.pendingComparisonDataSource === this.comparisonDataSource) return
-      this.comparisonDataSource = this.pendingComparisonDataSource
-      this.comparisonSourceMeta = {
-        data_source: '',
-        snapshot_time: '',
-        fallback_reason: ''
+    async manualRefreshLive() {
+      if (!this.portfolioLiveStore) return
+      try {
+        // Every user-triggered refresh on the comparison page shares this
+        // path: Spring Boot asks FastAPI/QMT for a fresh account+positions
+        // snapshot, then all widgets consume the returned dataVersion.
+        await this.portfolioLiveStore.manualRefresh()
+        await Promise.all([
+          this.refreshAllData(),
+          this.loadRiskThresholdData(this.currentAccountId)
+        ])
+      } catch (error) {
+        console.error('QMT手动刷新失败:', error)
       }
-      await this.refreshAllData()
     },
     async toggleTimeGranularity() {
       this.timeGranularity = this.timeGranularity === 'DAILY' ? 'ALL' : 'DAILY'
@@ -318,33 +315,35 @@ export default {
     },
     async refreshAllData() {
       const currentRequestId = ++this.comparisonRequestId
-      const requestedSource = this.comparisonDataSource
       let currentAccountId = this.currentAccountId || useAccountStore().selectedAccountId
       if (!currentAccountId) return
 
       try {
         let rawData = null
         if (this.activeMenu === 'asset') {
-          rawData = await fetchAssetComparison(currentAccountId, requestedSource)
+          if (!this.portfolioLiveStore?.currentLegacyAccount) {
+            await this.portfolioLiveStore?.loadLivePortfolio(currentAccountId)
+          }
+          rawData = this.portfolioLiveStore?.currentLegacyAccount
         } else if (this.activeMenu === 'time') {
           rawData = await fetchYearlyComparisonData(
             currentAccountId,
-            'mongodb',
+            'mysql',
             this.timeGranularity,
             this.timeReturnMode
           )
         } else if (this.activeMenu === 'region') {
-          rawData = await fetchAreaComparison(currentAccountId, requestedSource)
+          rawData = await fetchAreaComparison(currentAccountId, 'mysql')
         }
         if (!rawData) return
-        if (currentRequestId !== this.comparisonRequestId || requestedSource !== this.comparisonDataSource) {
+        if (currentRequestId !== this.comparisonRequestId) {
           return
         }
 
         this.comparisonSourceMeta = {
-          data_source: rawData.data_source || (this.activeMenu === 'time' ? 'mongodb_history' : ''),
+          data_source: rawData.data_source || (this.activeMenu === 'time' ? 'mysql_snapshot' : ''),
           snapshot_time: rawData.snapshot_time || rawData.latest_time || '',
-          fallback_reason: rawData.fallback_reason || '',
+          fallback_reason: rawData.fallback_reason || rawData.warnings?.join('；') || '',
           calculation_method: rawData.calculation_method || '',
           return_calculation_mode: rawData.return_calculation_mode || this.timeReturnMode,
           warnings: rawData.warnings || []
@@ -401,8 +400,13 @@ export default {
     },
     getChartType() { return this.activeMenu },
     getTableType() { return this.activeMenu },
-    handleAccountChange(accountId) {
+    async handleAccountChange(accountId) {
       this.currentAccountId = accountId || ''
+      try {
+        await this.portfolioLiveStore?.selectAccount(this.currentAccountId)
+      } catch (error) {
+        console.error('切换实时组合账户失败:', error)
+      }
       this.refreshAllData()
       this.loadRiskThresholdData(this.currentAccountId)
     }
@@ -418,20 +422,17 @@ export default {
       if (this.comparisonSourceMeta?.data_source === 'qmt_position_reconstruction') {
         return 'QMT日线+当前持仓重建（非券商历史净值）'
       }
-      return this.comparisonDataSource === 'qmt' ? 'QMT实时' : 'MongoDB缓存'
-    },
-    pendingComparisonSourceLabel() {
-      return this.pendingComparisonDataSource === 'qmt' ? 'QMT实时' : 'MongoDB缓存'
+      if (this.activeMenu === 'asset') {
+        return this.portfolioLiveStore?.isLive ? 'Redis实时快照（QMT采集）' : 'MySQL最近同步快照（离线降级）'
+      }
+      return 'MySQL历史快照'
     },
     comparisonStatusText() {
       const activeText = `已生效:${this.appliedComparisonSourceLabel}`
-      const pendingText = this.pendingComparisonDataSource !== this.comparisonDataSource
-        ? ` | 待切换:${this.pendingComparisonSourceLabel}`
-        : ''
       const timeText = this.comparisonSourceMeta?.snapshot_time
         ? String(this.comparisonSourceMeta.snapshot_time).replace('T', ' ')
         : '--'
-      return `${activeText}${pendingText} | ${timeText}`
+      return `${activeText} | ${timeText}`
     }
   }
 }

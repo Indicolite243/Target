@@ -154,6 +154,15 @@ cd D:\Target
 
 再根据 8000、8080、5173 对应窗口的错误信息排查。浏览器已经打开但页面没有数据时，确认 Spring Boot 8080 和 QMT 客户端均已正常运行。
 
+QMT已登录极简模式后，可运行只读实时链路基准（不会下单、不会输出资金和持仓明细）：
+
+```powershell
+cd D:\Target
+.\scripts\benchmark-live-api.ps1 -Iterations 10 -IntervalMs 2000
+```
+
+脚本输出FastAPI实时组合接口的成功数、数据源、持仓条数和HTTP/服务内P50、P95耗时，用于记录本机性能基线。
+
 ### 8. IDEA 实时日志启动方式
 
 项目还提供了 IDEA 运行配置，用于让 Python 和 Vite 的实时日志直接显示在 IDEA 的 Run 窗口：

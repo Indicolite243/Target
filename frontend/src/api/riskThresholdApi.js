@@ -28,7 +28,7 @@ function transformRiskData(backendData = {}) {
         is_mock: String(backendData.dataVersion || '').startsWith('simulation-'),
         algorithm_version: backendData.algorithmVersion,
         data_version: backendData.dataVersion,
-        calculation_mode: String(backendData.dataVersion || '').includes('mongodb-snapshot-all-') ? 'ALL' : 'DAILY',
+        calculation_mode: String(backendData.dataVersion || '').includes('mysql-snapshot-all-') ? 'ALL' : 'DAILY',
         risk_level: backendData.riskLevel,
         risk_score: backendData.riskScore,
         recommendations: backendData.recommendations || [],
@@ -43,7 +43,7 @@ function transformRiskData(backendData = {}) {
   if (backendData.volatility) indicators.push({ metric: '波动率', value: `${backendData.volatility.annual_volatility}%`, status: mapStatus(backendData.volatility.status) })
   if (backendData.max_drawdown) indicators.push({ metric: '最大回撤', value: `${backendData.max_drawdown.max_drawdown}%`, status: mapStatus(backendData.max_drawdown.status) })
   if (backendData.var) indicators.push({ metric: 'VaR值', value: `${backendData.var.var_rate}%`, status: mapStatus(backendData.var.status) })
-  return { risk_indicators: indicators, meta: { data_source: backendData.data_source || 'mongodb', snapshot_time: backendData.snapshot_time || '' } }
+  return { risk_indicators: indicators, meta: { data_source: backendData.data_source || 'mysql_account_snapshots', snapshot_time: backendData.snapshot_time || '' } }
 }
 
 function mapStatus(status = '') {

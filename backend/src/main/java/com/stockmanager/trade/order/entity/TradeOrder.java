@@ -31,4 +31,6 @@ public class TradeOrder {
     private String remark;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+    /** Soft-delete timestamp for user-managed history cleanup; never cancels a broker order. */
+    private LocalDateTime deletedAt;
 }

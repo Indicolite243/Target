@@ -4,19 +4,7 @@
       <div class="title">所有账户总资产数据</div>
 
       <div class="source-bar">
-        <span class="source-label">数据源</span>
-        <el-select v-model="pendingDataSource" size="small">
-          <el-option label="国金QMT模拟账户（同步到MySQL）" value="simulation" />
-          <el-option label="MongoDB快照（待同步）" value="mongodb" disabled />
-        </el-select>
-        <el-button
-          size="small"
-          type="primary"
-          :disabled="pendingDataSource === dataSource"
-          @click="confirmSourceChange"
-        >
-          确认
-        </el-button>
+        <span class="source-label">当前数据</span>
         <span class="source-state">已生效：{{ appliedSourceText }}</span>
         <el-tag size="small" :type="qmtConnected ? 'success' : 'danger'">
           {{ qmtConnected ? 'QMT已连接' : 'QMT未连接' }}
@@ -27,7 +15,6 @@
         <el-select
           v-model="selectedAccount"
           placeholder="请选择账户"
-          @change="handleAccountChange"
         >
           <el-option
             v-for="account in accounts"
@@ -42,7 +29,7 @@
           :disabled="!selectedAccount || syncing"
           @click="syncSelectedAccount"
         >
-          同步QMT账户
+          立即刷新
         </el-button>
       </div>
 
@@ -118,18 +105,24 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { fetchAccountInfo, fetchQmtStatus, syncQmtAccount } from '@/api/accountApi.js'
+import { fetchQmtStatus } from '@/api/accountApi.js'
+import { usePortfolioLiveStore } from '@/store/portfolioLive.js'
 
-const accounts = ref([])
-const selectedAccount = ref('')
-const dataSource = ref('simulation')
-const pendingDataSource = ref('simulation')
-const latestMeta = ref({ data_source: '', snapshot_time: '', is_realtime: false, fallback_reason: '' })
-const requestId = ref(0)
-const loadError = ref('')
-const syncing = ref(false)
+const portfolioLiveStore = usePortfolioLiveStore()
+const accounts = computed(() => portfolioLiveStore.accounts)
+const selectedAccount = computed({
+  get: () => portfolioLiveStore.selectedAccountId,
+  set: (accountId) => portfolioLiveStore.selectAccount(accountId).catch(() => {})
+})
+const latestMeta = computed(() => ({
+  data_source: portfolioLiveStore.snapshot?.source || 'MYSQL',
+  snapshot_time: portfolioLiveStore.snapshot?.snapshotTime || '',
+  is_realtime: portfolioLiveStore.isLive,
+  fallback_reason: portfolioLiveStore.snapshot?.warnings?.join('；') || ''
+}))
+const loadError = computed(() => portfolioLiveStore.error)
+const syncing = computed(() => portfolioLiveStore.refreshing)
 const qmtStatus = ref({ qmtConnected: false, subscribed: false, lastError: '' })
-let timer = null
 
 function headerStyle() {
   return {
@@ -169,7 +162,7 @@ function formatNumber(value, decimals = 2) {
 const qmtConnected = computed(() => Boolean(qmtStatus.value.qmtConnected && qmtStatus.value.subscribed !== false))
 const qmtStatusMessage = computed(() => {
   if (qmtConnected.value) {
-    return '国金QMT模拟账户已连接，可点击“同步QMT账户”刷新资产和持仓'
+    return 'QMT已连接：页面每2秒读取Redis实时快照，点击“立即刷新”会直接请求QMT'
   }
   const error = qmtStatus.value.lastError || qmtStatus.value.error || ''
   if (error.includes('connect returned -1')) {
@@ -181,59 +174,13 @@ const qmtStatusMessage = computed(() => {
   return error || '请先在国金QMT交易端登录资金账号并进入极简模式'
 })
 const appliedSourceLabel = computed(() => {
-  if (dataSource.value !== 'simulation') return 'MongoDB快照'
-  return accounts.value.some(item => item.data_source === 'qmt')
-    ? '国金QMT模拟账户（MySQL持久化）'
-    : '本地模拟账户（MySQL）'
+  return latestMeta.value.is_realtime ? 'Redis实时快照（QMT采集）' : 'MySQL最近同步快照（离线降级）'
 })
 const appliedSourceText = computed(() => {
   const timeText = latestMeta.value.snapshot_time ? latestMeta.value.snapshot_time.replace('T', ' ') : ''
-  return timeText ? `${appliedSourceLabel.value} ${timeText}` : appliedSourceLabel.value
+  const versionText = portfolioLiveStore.dataVersion ? `，版本 ${portfolioLiveStore.dataVersion}` : ''
+  return timeText ? `${appliedSourceLabel.value} ${timeText}${versionText}` : appliedSourceLabel.value
 })
-
-async function loadAccountData() {
-  const currentRequestId = ++requestId.value
-  const requestedSource = dataSource.value
-  loadError.value = ''
-  try {
-    const data = await fetchAccountInfo(requestedSource)
-    if (currentRequestId !== requestId.value || requestedSource !== dataSource.value) {
-      return
-    }
-
-    latestMeta.value = {
-      data_source: data.data_source || (requestedSource === 'simulation' ? 'mysql' : 'mongodb_cache'),
-      snapshot_time: data.snapshot_time || '',
-      is_realtime: Boolean(data.is_realtime),
-      fallback_reason: ''
-    }
-    if (!data?.accounts?.length) {
-      accounts.value = []
-      selectedAccount.value = ''
-      return
-    }
-
-    const previousSelected = selectedAccount.value
-    accounts.value = data.accounts.map(account => {
-      const totalReturnRate = Number.isFinite(Number(account.total_return_rate))
-        ? Number(account.total_return_rate)
-        : 0
-      const totalPositions = Number(account.total_positions || 0)
-      return {
-        ...account,
-        total_return_rate: `${totalReturnRate.toFixed(2)}%`,
-        total_positions: totalPositions
-      }
-    })
-
-    if (!previousSelected || !accounts.value.find(item => item.account_id === previousSelected)) {
-      selectedAccount.value = accounts.value[0].account_id
-    }
-  } catch (error) {
-    loadError.value = error?.message || '账户数据加载失败'
-    console.error('获取账户信息失败:', error)
-  }
-}
 
 async function loadQmtStatus() {
   try {
@@ -249,51 +196,34 @@ async function loadQmtStatus() {
 
 async function syncSelectedAccount() {
   if (!selectedAccount.value || syncing.value) return
-  syncing.value = true
-  loadError.value = ''
   try {
-    const result = await syncQmtAccount(selectedAccount.value)
-    await Promise.all([loadAccountData(), loadQmtStatus()])
-    const warningText = result.warnings?.length ? `；${result.warnings.join('；')}` : ''
-    ElMessage.success(`QMT账户同步成功${warningText}`)
-  } catch (error) {
-    loadError.value = error?.message || 'QMT账户同步失败'
+    const result = await portfolioLiveStore.manualRefresh()
     await loadQmtStatus()
-    ElMessage.error(loadError.value)
-  } finally {
-    syncing.value = false
+    const warningText = result?.warnings?.length ? `；${result.warnings.join('；')}` : ''
+    ElMessage.success(`QMT实时数据已刷新${warningText}`)
+  } catch (error) {
+    await loadQmtStatus()
+    ElMessage.error(portfolioLiveStore.error || error?.message || 'QMT实时刷新失败')
   }
 }
 
-function handleAccountChange(accountId) {
-  selectedAccount.value = accountId
-}
-
-function confirmSourceChange() {
-  if (pendingDataSource.value === dataSource.value) return
-  dataSource.value = pendingDataSource.value
-  accounts.value = []
-  selectedAccount.value = ''
-  latestMeta.value = { data_source: '', snapshot_time: '', is_realtime: false, fallback_reason: '' }
-  loadError.value = ''
-  loadAccountData()
-}
-
 const selectedAccountData = computed(() => {
-  const account = accounts.value.find(item => item.account_id === selectedAccount.value)
+  const account = portfolioLiveStore.currentLegacyAccount
   if (!account) return []
+  const totalReturnRate = Number.isFinite(Number(account.total_return_rate))
+    ? `${Number(account.total_return_rate).toFixed(2)}%` : '0.00%'
   return [{
     account_id: `${account.account_name || '账户'} ${account.display_account_id || account.account_no || ''}`,
     total_asset: formatNumber(account.total_asset),
     cash: formatNumber(account.cash),
-    total_return_rate: account.total_return_rate,
+    total_return_rate: totalReturnRate,
     total_positions: formatNumber(account.total_positions, 0),
     market_value: formatNumber(account.market_value)
   }]
 })
 
 const selectedStocks = computed(() => {
-  const account = accounts.value.find(item => item.account_id === selectedAccount.value)
+  const account = portfolioLiveStore.currentLegacyAccount
   if (!account?.positions?.length) return []
   return [...account.positions]
     .sort((a, b) => Number(b.market_value || 0) - Number(a.market_value || 0))
@@ -308,20 +238,13 @@ const selectedStocks = computed(() => {
 })
 
 onMounted(() => {
-  pendingDataSource.value = dataSource.value
-  Promise.all([loadAccountData(), loadQmtStatus()])
-  timer = setInterval(() => {
-    if (dataSource.value !== 'simulation' || syncing.value) return
-    loadAccountData()
-    loadQmtStatus()
-  }, 5000)
+  portfolioLiveStore.initialize().catch(() => {})
+  portfolioLiveStore.startPolling()
+  loadQmtStatus()
 })
 
 onBeforeUnmount(() => {
-  if (timer) {
-    clearInterval(timer)
-    timer = null
-  }
+  portfolioLiveStore.stopPolling()
 })
 </script>
 

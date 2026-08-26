@@ -1,12 +1,13 @@
 package com.stockmanager.account.service.impl;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
-import com.stockmanager.account.document.AccountSnapshot;
+import com.stockmanager.account.entity.AccountHistorySnapshot;
 import com.stockmanager.account.entity.Account;
 import com.stockmanager.account.entity.Position;
+import com.stockmanager.account.history.PortfolioHistoryPersistenceService;
 import com.stockmanager.account.mapper.AccountMapper;
+import com.stockmanager.account.mapper.AccountHistorySnapshotMapper;
 import com.stockmanager.account.mapper.PositionMapper;
-import com.stockmanager.account.repository.AccountSnapshotRepository;
 import com.stockmanager.account.service.AccountService;
 import com.stockmanager.account.vo.AccountSyncView;
 import com.stockmanager.account.vo.AccountView;
@@ -16,7 +17,6 @@ import com.stockmanager.integration.quant.QuantClient;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.beans.factory.annotation.Value;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -34,16 +34,18 @@ import java.util.Map;
 public class AccountServiceImpl implements AccountService {
     private final AccountMapper accountMapper;
     private final PositionMapper positionMapper;
-    private final AccountSnapshotRepository snapshotRepository;
+    private final AccountHistorySnapshotMapper historySnapshotMapper;
+    private final PortfolioHistoryPersistenceService historyPersistenceService;
     private final QuantClient quantClient;
-    @Value("${app.snapshot.mongodb-interval-ms:300000}")
-    private long mongodbSnapshotIntervalMs;
 
     public AccountServiceImpl(AccountMapper accountMapper, PositionMapper positionMapper,
-                              AccountSnapshotRepository snapshotRepository, QuantClient quantClient) {
+                              AccountHistorySnapshotMapper historySnapshotMapper,
+                              PortfolioHistoryPersistenceService historyPersistenceService,
+                              QuantClient quantClient) {
         this.accountMapper = accountMapper;
         this.positionMapper = positionMapper;
-        this.snapshotRepository = snapshotRepository;
+        this.historySnapshotMapper = historySnapshotMapper;
+        this.historyPersistenceService = historyPersistenceService;
         this.quantClient = quantClient;
     }
 
@@ -69,14 +71,6 @@ public class AccountServiceImpl implements AccountService {
     @Transactional
     public AccountSyncView syncAccount(Long userId, Long accountId, String traceId) {
         return syncAccountInternal(userId, accountId, traceId, "MANUAL", true);
-    }
-
-    @Override
-    @Transactional
-    public AccountSyncView syncAccountScheduled(Long userId, Long accountId, String traceId, String snapshotType) {
-        String type = snapshotType == null || snapshotType.isBlank() ? "INTRADAY" : snapshotType.toUpperCase();
-        boolean force = "DAILY".equals(type);
-        return syncAccountInternal(userId, accountId, traceId, type, force);
     }
 
     private AccountSyncView syncAccountInternal(Long userId, Long accountId, String traceId,
@@ -131,61 +125,28 @@ public class AccountServiceImpl implements AccountService {
 
         List<String> warnings = stringList(result.get("warnings"));
         try {
-            AccountSnapshot snapshot = new AccountSnapshot();
-            snapshot.setAccountId(accountId);
-            snapshot.setSnapshotTime(snapshotTime);
-            snapshot.setTotalAsset(account.getTotalAsset());
-            snapshot.setCash(account.getCash());
-            snapshot.setMarketValue(account.getMarketValue());
-            snapshot.setSource(source);
-            snapshot.setDataVersion("1");
-            snapshot.setSnapshotType(snapshotType);
-            snapshot.setPositions(positions.stream().map(position -> {
-                Map<String, String> item = new LinkedHashMap<>();
-                item.put("symbol", position.symbol());
-                item.put("securityName", position.securityName());
-                item.put("quantity", position.quantity());
-                item.put("availableQuantity", position.availableQuantity());
-                item.put("costPrice", position.costPrice());
-                item.put("lastPrice", position.lastPrice());
-                item.put("marketValue", position.marketValue());
-                item.put("profitLoss", position.profitLoss());
-                item.put("industry", optionalString(position.industry(), ""));
-                item.put("region", optionalString(position.region(), ""));
-                return item;
-            }).toList());
-            if (forceSnapshot || shouldPersistScheduledSnapshot(accountId, snapshotType, snapshotTime)) {
-                snapshotRepository.save(snapshot);
-            }
+            historyPersistenceService.persistLegacySnapshot(accountId, snapshotTime, snapshotType, source,
+                    "legacy-" + snapshotTime.atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli(),
+                    toView(account), positions, forceSnapshot);
         } catch (Exception ex) {
-            warnings.add("MySQL已同步，但MongoDB快照保存失败");
+            warnings.add("MySQL已同步，但历史快照保存失败");
         }
 
         return new AccountSyncView(toView(account), positions,
                 source, snapshotTime, List.copyOf(warnings));
     }
 
-    private boolean shouldPersistScheduledSnapshot(Long accountId, String snapshotType, LocalDateTime snapshotTime) {
-        if ("DAILY".equalsIgnoreCase(snapshotType)) {
-            LocalDateTime dayStart = snapshotTime.toLocalDate().atStartOfDay();
-            LocalDateTime dayEnd = dayStart.plusDays(1).minusNanos(1);
-            return snapshotRepository.findFirstByAccountIdAndSnapshotTypeAndSnapshotTimeBetween(
-                    accountId, "DAILY", dayStart, dayEnd).isEmpty();
-        }
-        LocalDateTime latest = snapshotRepository.findFirstByAccountIdOrderBySnapshotTimeDesc(accountId)
-                .map(AccountSnapshot::getSnapshotTime).orElse(null);
-        long intervalSeconds = Math.max(30, mongodbSnapshotIntervalMs / 1000);
-        if (latest == null) return true;
-        return !snapshotTime.isBefore(latest.plusSeconds(intervalSeconds));
-    }
-
     @Override
-    public List<AccountSnapshot> listSnapshots(Long userId, Long accountId, LocalDate from, LocalDate to) {
+    public List<AccountHistorySnapshot> listSnapshots(Long userId, Long accountId, LocalDate from, LocalDate to) {
         requireAccount(userId, accountId);
         LocalDate start = from == null ? LocalDate.now().minusDays(365) : from;
         LocalDate end = to == null ? LocalDate.now() : to;
-        return snapshotRepository.findByAccountIdAndSnapshotTimeBetweenOrderBySnapshotTimeAsc(
-                accountId, start.atStartOfDay(), end.plusDays(1).atStartOfDay().minusNanos(1));
+        return historySnapshotMapper.selectList(Wrappers.<AccountHistorySnapshot>lambdaQuery()
+                .eq(AccountHistorySnapshot::getAccountId, accountId)
+                .between(AccountHistorySnapshot::getSnapshotTime, start.atStartOfDay(),
+                        end.plusDays(1).atStartOfDay().minusNanos(1))
+                .orderByAsc(AccountHistorySnapshot::getSnapshotTime)
+                .orderByAsc(AccountHistorySnapshot::getId));
     }
 
     @Override

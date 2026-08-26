@@ -7,7 +7,7 @@
 <script>
 import * as echarts from 'echarts';
 import { fetchYearlyComparisonData, fetchAreaComparison } from '@/api/comparisonModuleApi.js';
-import { fetchAccountInfo } from '@/api/accountApi.js';
+import { usePortfolioLiveStore } from '@/store/portfolioLive.js';
 
 export default {
   name: 'ComparisonChart',
@@ -94,14 +94,17 @@ export default {
       try {
         let rawData = null;
         if (requestedType === 'asset') {
-          const accountData = await fetchAccountInfo();
-          if (accountData && accountData.accounts) {
-            rawData = accountData.accounts.find(a => a.account_id === targetAccountId) || accountData.accounts[0];
+          const portfolioLiveStore = usePortfolioLiveStore();
+          await portfolioLiveStore.initialize();
+          rawData = portfolioLiveStore.currentLegacyAccount;
+          if (!rawData && targetAccountId) {
+            await portfolioLiveStore.loadLivePortfolio(targetAccountId);
+            rawData = portfolioLiveStore.currentLegacyAccount;
           }
         } else if (requestedType === 'time') {
-          rawData = await fetchYearlyComparisonData(targetAccountId, 'mongodb', this.timeGranularity);
+          rawData = await fetchYearlyComparisonData(targetAccountId, 'mysql', this.timeGranularity);
         } else if (requestedType === 'region') {
-          rawData = await fetchAreaComparison(targetAccountId);
+          rawData = await fetchAreaComparison(targetAccountId, 'mysql');
         }
 
         if (taskId !== this.updateTaskId) return;

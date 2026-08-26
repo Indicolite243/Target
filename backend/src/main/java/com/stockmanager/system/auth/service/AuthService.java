@@ -8,5 +8,6 @@ import com.stockmanager.system.auth.vo.UserView;
 public interface AuthService {
     UserView register(RegisterRequest request);
     LoginView login(LoginRequest request);
+    void logout(String accessToken);
     UserView currentUser(Long userId);
 }

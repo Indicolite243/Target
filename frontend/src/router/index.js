@@ -1,9 +1,12 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import DisplayPage from '@/views/DisplayPage.vue'
-import ComparisonPage from '@/views/ComparisonPage.vue'
-import LoginPage from '@/views/LoginPage.vue'
-import DealPage from '@/views/DealPage.vue'
 import { isAuthenticated } from '@/api/authApi.js'
+
+// Route-level loading keeps the initial login bundle small; charting, Excel
+// export and trading UI code are fetched only after the user needs that page.
+const DisplayPage = () => import('@/views/DisplayPage.vue')
+const ComparisonPage = () => import('@/views/ComparisonPage.vue')
+const LoginPage = () => import('@/views/LoginPage.vue')
+const DealPage = () => import('@/views/DealPage.vue')
 
 const routes = [
   {

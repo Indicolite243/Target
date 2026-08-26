@@ -42,15 +42,60 @@ const toLegacyAccount = (account, positions = []) => ({
   is_realtime: !account.stale
 })
 
-export async function fetchAccountInfo() {
+export const toLegacyLiveAccount = (snapshot) => {
+  if (!snapshot?.account) return null
+  const positions = (snapshot.positions || []).map(toLegacyPosition)
+  const account = toLegacyAccount({
+    ...snapshot.account,
+    stale: Boolean(snapshot.stale)
+  }, positions)
+  return {
+    ...account,
+    positions,
+    data_source: String(snapshot.source || 'mysql').toLowerCase(),
+    snapshot_time: snapshot.snapshotTime || snapshot.account.lastSyncTime || '',
+    is_realtime: snapshot.mode === 'LIVE' && !snapshot.stale,
+    data_version: String(snapshot.dataVersion ?? 0),
+    stale: Boolean(snapshot.stale),
+    age_ms: snapshot.ageMs ?? -1,
+    warnings: snapshot.warnings || []
+  }
+}
+
+/**
+ * Account metadata only. Do not use this for a current portfolio view: that
+ * view must read the Redis/MySQL snapshot through fetchLivePortfolio instead.
+ */
+export async function fetchAccountSummaries() {
   const response = await httpClient.get('/accounts')
-  const accounts = await Promise.all((response.data?.data || []).map(async (account) => {
-    const positionsResponse = await httpClient.get(`/accounts/${account.accountId}/positions`)
-    const positions = (positionsResponse.data?.data || []).map(toLegacyPosition)
-    return toLegacyAccount(account, positions)
-  }))
+  const accounts = (response.data?.data || []).map(account => toLegacyAccount(account))
   return {
     success: response.data?.code === 0,
+    accounts,
+    data_source: accounts.some((item) => item.data_source === 'qmt') ? 'qmt' : 'mysql',
+    snapshot_time: accounts[0]?.lastSyncTime || '',
+    is_realtime: accounts.some((item) => !item.stale)
+  }
+}
+
+/**
+ * Compatibility API for legacy callers that explicitly need every account's
+ * positions. Current portfolio pages must use /accounts/{id}/live instead so
+ * one refresh remains one request instead of a 1 + N fan-out.
+ */
+export async function fetchAccountInfo() {
+  const summary = await fetchAccountSummaries()
+  const accounts = await Promise.all(summary.accounts.map(async (account) => {
+    const positionsResponse = await httpClient.get(`/accounts/${account.account_id}/positions`)
+    const positions = (positionsResponse.data?.data || []).map(toLegacyPosition)
+    return {
+      ...account,
+      total_positions: positions.length,
+      positions
+    }
+  }))
+  return {
+    success: summary.success,
     accounts,
     data_source: accounts.some((item) => item.data_source === 'qmt') ? 'qmt' : 'mysql',
     snapshot_time: accounts[0]?.lastSyncTime || '',
@@ -72,11 +117,22 @@ export async function syncQmtAccount(accountId) {
   }
 }
 
+export async function fetchLivePortfolio(accountId) {
+  const response = await httpClient.get(`/accounts/${accountId}/live`)
+  return response.data?.data || null
+}
+
+export async function refreshLivePortfolio(accountId) {
+  const response = await httpClient.post(`/accounts/${accountId}/refresh`)
+  return response.data?.data || null
+}
+
 export const fetchGuojinAccountInfo = fetchAccountInfo
 
-export async function fetchGuojinSimQuote(stockCode) {
+export async function fetchGuojinSimQuote(stockCode, options = {}) {
   if (!stockCode) return null
-  const response = await httpClient.get('/market/quotes', { params: { symbols: stockCode } })
+  const allowStale = typeof options === 'object' ? options.allowStale !== false : true
+  const response = await httpClient.get('/market/quotes', { params: { symbols: stockCode, allowStale } })
   const quote = response.data?.data?.quotes?.[0]
   if (!quote) return null
   return {
@@ -144,6 +200,18 @@ export async function fetchOrderList(params = {}) {
   return { ...response.data, success: response.data?.code === 0 }
 }
 
+/** Soft-delete one terminal order from the user's visible history. */
+export async function deleteOrderHistory(orderId) {
+  const response = await httpClient.delete(`/orders/${orderId}`)
+  return { ...response.data, success: response.data?.code === 0 }
+}
+
+/** Soft-delete terminal history rows matching the optional date range. */
+export async function deleteFilteredOrderHistory(params = {}) {
+  const response = await httpClient.delete('/orders/history', { params })
+  return { ...response.data, success: response.data?.code === 0 }
+}
+
 export async function cancelOrder(payload = {}) {
   const orderId = payload.orderId || payload.order_id || payload.id
   const response = await httpClient.post(`/orders/${orderId}/cancel`, {
@@ -153,7 +221,7 @@ export async function cancelOrder(payload = {}) {
 }
 
 export async function fetchAssetCategoryData(accountId) {
-  const id = accountId || (await fetchAccountInfo()).accounts[0]?.account_id
+  const id = accountId || (await fetchAccountSummaries()).accounts[0]?.account_id
   const response = await httpClient.get(`/accounts/${id}/allocations`, {
     params: { dimension: 'ASSET_CLASS' }
   })
@@ -161,7 +229,7 @@ export async function fetchAssetCategoryData(accountId) {
 }
 
 export async function fetchRegionDataFromBackend(accountId) {
-  const id = accountId || (await fetchAccountInfo()).accounts[0]?.account_id
+  const id = accountId || (await fetchAccountSummaries()).accounts[0]?.account_id
   const response = await httpClient.get(`/accounts/${id}/analyses/allocation`, {
     params: { dimension: 'REGION' }
   })
@@ -169,7 +237,7 @@ export async function fetchRegionDataFromBackend(accountId) {
 }
 
 export async function fetchTimeDataFromBackend(params = {}) {
-  const id = params.accountId || params.account_id || (await fetchAccountInfo()).accounts[0]?.account_id
+  const id = params.accountId || params.account_id || (await fetchAccountSummaries()).accounts[0]?.account_id
   const response = await httpClient.get(`/accounts/${id}/snapshots`, { params })
   return response.data?.data
 }

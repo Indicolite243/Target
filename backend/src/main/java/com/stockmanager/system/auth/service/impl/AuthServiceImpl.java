@@ -8,6 +8,7 @@ import com.stockmanager.system.auth.dto.RegisterRequest;
 import com.stockmanager.system.auth.entity.User;
 import com.stockmanager.system.auth.mapper.UserMapper;
 import com.stockmanager.system.auth.security.JwtService;
+import com.stockmanager.system.auth.security.JwtTokenBlacklist;
 import com.stockmanager.system.auth.service.AuthService;
 import com.stockmanager.system.auth.vo.LoginView;
 import com.stockmanager.system.auth.vo.UserView;
@@ -25,13 +26,16 @@ public class AuthServiceImpl implements AuthService {
     private final UserMapper userMapper;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
+    private final JwtTokenBlacklist tokenBlacklist;
     private final AccountProvisioningService accountProvisioningService;
 
     public AuthServiceImpl(UserMapper userMapper, PasswordEncoder passwordEncoder, JwtService jwtService,
+                           JwtTokenBlacklist tokenBlacklist,
                            AccountProvisioningService accountProvisioningService) {
         this.userMapper = userMapper;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
+        this.tokenBlacklist = tokenBlacklist;
         this.accountProvisioningService = accountProvisioningService;
     }
 
@@ -70,6 +74,11 @@ public class AuthServiceImpl implements AuthService {
         }
         return new LoginView(jwtService.issue(user.getId(), user.getUsername(), user.getRoleCode()),
                 "Bearer", jwtService.expirationSeconds(), toView(user));
+    }
+
+    @Override
+    public void logout(String accessToken) {
+        tokenBlacklist.revoke(jwtService.parse(accessToken));
     }
 
     @Override

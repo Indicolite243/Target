@@ -12,7 +12,10 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    mode: str = "SIMULATION"
+    # Production and local demonstrations always read the configured QMT account.
+    # TEST_MOCK is deliberately explicit so mock data can never become a silent
+    # fallback when QMT is unavailable.
+    mode: str = "QMT"
     internal_token: str = "development-internal-token"
     service_version: str = "1.0.0"
     qmt_path: str = Field(
@@ -48,6 +51,13 @@ class Settings(BaseSettings):
     @classmethod
     def uppercase_modes(cls, value: object) -> str:
         return str(value).strip().upper()
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        if value not in {"QMT", "TEST_MOCK"}:
+            raise ValueError("QUANT_MODE must be QMT or TEST_MOCK")
+        return value
 
     @field_validator("qmt_account_id", mode="before")
     @classmethod

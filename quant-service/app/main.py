@@ -88,7 +88,29 @@ def accounts_sync(payload: AccountSyncRequest,
                   x_trace_id: str = Header(default="", alias="X-Trace-Id"),
                   settings: Settings = Depends(get_settings)) -> InternalResponse:
     started = perf_counter()
-    if settings.mode != "QMT":
+    if settings.mode == "TEST_MOCK":
+        return response(sync_account(payload), x_trace_id, started)
+    try:
+        data = get_qmt_adapter(settings).sync(payload)
+    except QmtAdapterError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return response(data, x_trace_id, started)
+
+
+@app.post("/internal/v1/accounts/live", response_model=InternalResponse, dependencies=[Depends(authorize)])
+def accounts_live(payload: AccountSyncRequest,
+                  x_trace_id: str = Header(default="", alias="X-Trace-Id"),
+                  settings: Settings = Depends(get_settings)) -> InternalResponse:
+    """Read one coherent asset + position snapshot from the configured source.
+
+    This endpoint intentionally returns no order/trade payload. It is the only
+    QMT read endpoint used by the two-second portfolio collector, so the Java
+    layer can cache one dataVersion for all current portfolio widgets.
+    """
+    started = perf_counter()
+    payload.includePositions = True
+    payload.includeOrders = False
+    if settings.mode == "TEST_MOCK":
         return response(sync_account(payload), x_trace_id, started)
     try:
         data = get_qmt_adapter(settings).sync(payload)
@@ -155,8 +177,8 @@ def orders_cancel(payload: CancelOrderRequest,
 def orders_query(x_trace_id: str = Header(default="", alias="X-Trace-Id"),
                  settings: Settings = Depends(get_settings)) -> InternalResponse:
     started = perf_counter()
-    if settings.mode != "QMT":
-        return response({"orders": [], "source": "simulation", "warnings": []}, x_trace_id, started)
+    if settings.mode == "TEST_MOCK":
+        return response({"orders": [], "source": "test_mock", "warnings": []}, x_trace_id, started)
     try:
         data = get_qmt_adapter(settings).query_orders()
     except QmtAdapterError as exc:

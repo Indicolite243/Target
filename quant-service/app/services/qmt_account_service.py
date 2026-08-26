@@ -62,6 +62,10 @@ _ORDER_STATUS = {
     255: "UNKNOWN",
 }
 
+# subscribe_quote is asynchronous in MiniQMT. A newly subscribed symbol can
+# legitimately have no tick in the first immediate get_full_tick call.
+_QUOTE_FIRST_TICK_RETRY_DELAYS = (0.08, 0.16, 0.32)
+
 
 def _value(record: Any, *names: str, default: Any = None) -> Any:
     for name in names:
@@ -338,7 +342,20 @@ class QmtAccountAdapter:
                 try:
                     for symbol in normalized:
                         self._xtdata_module.subscribe_quote(symbol, period="1d", count=1)
-                    ticks = self._xtdata_module.get_full_tick(normalized) or {}
+                    for delay in (0.0, *_QUOTE_FIRST_TICK_RETRY_DELAYS):
+                        if delay:
+                            time.sleep(delay)
+                        candidate = self._xtdata_module.get_full_tick(normalized) or {}
+                        ticks = candidate if isinstance(candidate, dict) else {}
+                        # A non-empty tick shell is not enough: MiniQMT can first
+                        # return metadata with a zero last price while the real
+                        # quote is still being delivered. Keep polling in this
+                        # request so one search click produces a complete quote.
+                        if all(
+                            _decimal(_value(ticks.get(symbol, {}), "lastPrice", "last_price", default=0)) > 0
+                            for symbol in normalized
+                        ):
+                            break
                 except Exception:
                     ticks = {}
             quotes: list[dict[str, Any]] = []
