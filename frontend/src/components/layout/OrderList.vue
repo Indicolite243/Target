@@ -415,6 +415,7 @@ async function resolveOrderStockName(order) {
 }
 
 function buildOrderQuery() {
+  // 日期只作为查询参数传给后端；筛选在数据库完成，避免前端先拉全量订单再截取。
   const query = {}
   if (Array.isArray(dateRange.value) && dateRange.value.length === 2) {
     query.start_date = dateRange.value[0]
@@ -431,6 +432,7 @@ function formatDateInput(date) {
 }
 
 function setDatePreset(preset) {
+  // 快捷范围包含今天：7d/30d 的起点分别向前推 6/29 天。
   datePreset.value = preset
   const end = new Date()
   const start = new Date(end)
@@ -442,6 +444,7 @@ function setDatePreset(preset) {
 }
 
 function handleDateChange() {
+  // 手动选日期后清除快捷按钮状态，防止界面出现“近7天”和自定义范围同时高亮。
   datePreset.value = ''
   clearSelectedRows()
   refreshOrders()
@@ -477,6 +480,7 @@ async function refreshOrders() {
   if (loading.value) return
   loading.value = true
   try {
+    // 返回数据统一经过 normalizeOrder，兼容 QMT 字段名、旧接口字段名和中文状态。
     const response = await fetchOrderList(buildOrderQuery())
     const payload = response || {}
     const orders = payload.data?.items || payload.data?.orders || payload.orders || []
@@ -500,6 +504,7 @@ async function refreshOrders() {
 }
 
 async function deleteOne(row) {
+  // 删除是历史记录软删除；终态才允许删除，进行中的订单必须走撤单流程。
   if (!canDelete(row)) return
   const orderId = normalizeOrderId(row.order_id)
   try {
@@ -534,6 +539,7 @@ async function deleteOne(row) {
 }
 
 async function deleteSelected() {
+  // 复选框本身只允许选择终态，二次过滤是为了防止状态在刷新期间发生变化。
   const rows = selectedRows.value.filter(canDelete)
   if (!rows.length || deleting.value) return
   try {
@@ -562,6 +568,7 @@ async function deleteSelected() {
 }
 
 async function deleteFiltered() {
+  // “清空当前筛选”仍由后端按日期范围执行，且后端只删除终态记录。
   if (!filteredOrderList.value.length || deleting.value) return
   const rangeText = dateRange.value?.length === 2 ? `${dateRange.value[0]} 至 ${dateRange.value[1]}` : '当前全部日期'
   try {
@@ -598,8 +605,8 @@ function isCancelling(row) {
   return cancellingRows.value.has(contractNo || orderId || '')
 }
 
-// Keep the UI aligned with the backend/QMT lifecycle: only an accepted,
-// unfilled or partially filled order may be withdrawn.
+// 与后端/QMT 生命周期保持一致：只有已接受、未完成或部分成交的委托可撤单；
+// 已成、已撤、废单等终态只能删除历史展示记录，不能再向券商发撤单请求。
 function canCancel(row) {
   return isPendingStatus(row.status)
 }

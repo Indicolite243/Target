@@ -16,25 +16,35 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Reads immutable MySQL account and position snapshots for historical analysis. */
+/**
+ * 读取MySQL不可变账户/持仓快照，并组装时间对比、风险和归因共用的历史结构。
+ * 本服务只读数据库，不调用QMT，也不会把“当前持仓穿越回放”伪装成真实账户历史。
+ */
 @Service
 public class AccountSnapshotHistoryService {
     private final AccountHistorySnapshotMapper accountSnapshotMapper;
     private final PositionHistorySnapshotMapper positionSnapshotMapper;
 
+    /** 注入账户历史和持仓历史 Mapper。 */
     public AccountSnapshotHistoryService(AccountHistorySnapshotMapper accountSnapshotMapper,
                                          PositionHistorySnapshotMapper positionSnapshotMapper) {
         this.accountSnapshotMapper = accountSnapshotMapper;
         this.positionSnapshotMapper = positionSnapshotMapper;
     }
 
+    /** 使用默认 DAILY 粒度读取统一组合历史结构。 */
     public Map<String, Object> portfolioHistory(Long accountId, LocalDate start, LocalDate end) {
         return portfolioHistory(accountId, start, end, "DAILY");
     }
 
+    /**
+     * 按粒度恢复账户资产时间序列和对应持仓历史，供时间对比、风险和归因复用。
+     */
     public Map<String, Object> portfolioHistory(Long accountId, LocalDate start, LocalDate end,
                                                 String granularity) {
+        // 先按时间升序读取区间内全部账户资产快照，后续粒度转换依赖该稳定顺序。
         List<AccountHistorySnapshot> snapshots = snapshots(accountId, start, end);
+        // warnings随结果返回前端，用来解释缺失边界和持仓快照替代情况。
         List<String> warnings = new ArrayList<>();
         if (snapshots.isEmpty()) {
             warnings.add("所选区间没有账户快照，请先启动服务并等待 QMT 定时采集或手动同步账户");
@@ -43,6 +53,7 @@ public class AccountSnapshotHistoryService {
 
         List<Map<String, String>> values;
         if ("ALL".equalsIgnoreCase(granularity)) {
+            // ALL保留每一次盘中/收盘采样，date包含具体时间，适合查看日内变化。
             values = snapshots.stream().map(snapshot -> {
                 Map<String, String> point = new LinkedHashMap<>();
                 point.put("date", snapshot.getSnapshotTime().toString());
@@ -50,7 +61,7 @@ public class AccountSnapshotHistoryService {
                 return point;
             }).toList();
         } else {
-            // DAILY keeps the last captured state for each trading/calendar day.
+            // DAILY按日期覆盖：由于snapshots升序，最终保留每个自然日最后一次采集状态。
             Map<LocalDate, AccountHistorySnapshot> daily = new LinkedHashMap<>();
             for (AccountHistorySnapshot snapshot : snapshots) {
                 daily.put(snapshot.getSnapshotTime().toLocalDate(), snapshot);
@@ -63,6 +74,7 @@ public class AccountSnapshotHistoryService {
             }).toList();
         }
 
+        // 起止边界使用区间内实际第一/最后快照，而不是伪造用户选择日期的资产值。
         AccountHistorySnapshot startSnapshot = snapshots.getFirst();
         AccountHistorySnapshot endSnapshot = snapshots.getLast();
         if (!startSnapshot.getSnapshotTime().toLocalDate().equals(start)) {
@@ -76,6 +88,7 @@ public class AccountSnapshotHistoryService {
                 ? "当前粒度：全部快照"
                 : "当前粒度：每日最后一条快照");
 
+        // 持仓期间变化只需要起点与终点两份完整持仓，不为每个资产点展开全量持仓。
         Map<String, Object> result = result(values,
                 positionHistory(accountId, startSnapshot, endSnapshot, warnings), warnings, start, end);
         result.put("rangeStart", values.getFirst().get("date"));
@@ -85,6 +98,7 @@ public class AccountSnapshotHistoryService {
     }
 
     private List<AccountHistorySnapshot> snapshots(Long accountId, LocalDate start, LocalDate end) {
+        // 将LocalDate扩展为闭区间[start 00:00:00, end 23:59:59.999...]。
         LocalDateTime from = start.atStartOfDay();
         LocalDateTime to = end.plusDays(1).atStartOfDay().minusNanos(1);
         return accountSnapshotMapper.selectList(Wrappers.<AccountHistorySnapshot>lambdaQuery()
@@ -96,19 +110,24 @@ public class AccountSnapshotHistoryService {
 
     private List<Map<String, Object>> positionHistory(Long accountId, AccountHistorySnapshot start,
                                                       AccountHistorySnapshot end, List<String> warnings) {
+        // 资产快照不一定每次都带持仓，因此分别查找边界附近最近的“完整持仓快照”。
         AccountHistorySnapshot startPositions = positionSnapshotFor(accountId, start.getSnapshotTime(), "起点", warnings);
         AccountHistorySnapshot endPositions = positionSnapshotFor(accountId, end.getSnapshotTime(), "终点", warnings);
+        // 转成证券代码索引后可以O(1)匹配同一证券的起止记录。
         Map<String, PositionHistorySnapshot> before = bySymbol(positions(startPositions));
         Map<String, PositionHistorySnapshot> after = bySymbol(positions(endPositions));
         List<Map<String, Object>> rows = new ArrayList<>();
+        // 以终点仍持有的证券为结果主体；区间内已经完全卖出的证券当前不会出现在此列表。
         for (Map.Entry<String, PositionHistorySnapshot> entry : after.entrySet()) {
             String symbol = entry.getKey();
             PositionHistorySnapshot current = entry.getValue();
             PositionHistorySnapshot previous = before.get(symbol);
+            // periodPnl当前采用“终点市值-起点市值”展示组合贡献，包含数量变化影响。
             BigDecimal endValue = zero(current.getMarketValue());
             BigDecimal startValue = previous == null ? BigDecimal.ZERO : zero(previous.getMarketValue());
             BigDecimal endPrice = zero(current.getLastPrice());
             BigDecimal startPrice = previous == null ? BigDecimal.ZERO : zero(previous.getLastPrice());
+            // 起点没有该证券或价格为空时，用终点记录中的成本价作为可解释回退值。
             if (startPrice.signum() == 0) startPrice = zero(current.getCostPrice());
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("symbol", symbol);
@@ -129,6 +148,7 @@ public class AccountSnapshotHistoryService {
 
     private AccountHistorySnapshot positionSnapshotFor(Long accountId, LocalDateTime at,
                                                         String boundary, List<String> warnings) {
+        // 优先使用边界时刻之前最近的完整快照，避免引入“未来持仓”；没有时才向后寻找第一份完整快照。
         AccountHistorySnapshot snapshot = accountSnapshotMapper.findLatestWithPositionsAtOrBefore(accountId, at);
         if (snapshot == null) snapshot = accountSnapshotMapper.findFirstWithPositionsAtOrAfter(accountId, at);
         if (snapshot == null) {
@@ -140,6 +160,7 @@ public class AccountSnapshotHistoryService {
     }
 
     private List<PositionHistorySnapshot> positions(AccountHistorySnapshot snapshot) {
+        // 没有可用边界快照时返回空集合，让调用方产生空归因和明确warning。
         if (snapshot == null) return List.of();
         return positionSnapshotMapper.selectList(Wrappers.<PositionHistorySnapshot>lambdaQuery()
                 .eq(PositionHistorySnapshot::getSnapshotId, snapshot.getId())
@@ -147,6 +168,7 @@ public class AccountSnapshotHistoryService {
     }
 
     private Map<String, PositionHistorySnapshot> bySymbol(List<PositionHistorySnapshot> positions) {
+        // LinkedHashMap保留数据库证券代码顺序，使接口结果和测试输出稳定。
         Map<String, PositionHistorySnapshot> result = new LinkedHashMap<>();
         for (PositionHistorySnapshot position : positions) {
             String symbol = text(position.getSecurityCode(), "");
@@ -159,6 +181,7 @@ public class AccountSnapshotHistoryService {
 
     private Map<String, Object> result(List<?> values, List<?> positionHistory,
                                        List<String> warnings, LocalDate start, LocalDate end) {
+        // 三个消费者统一使用portfolioValues/positionHistory字段，避免各业务重复定义历史协议。
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("portfolioValues", values);
         result.put("positionHistory", positionHistory);
@@ -172,6 +195,7 @@ public class AccountSnapshotHistoryService {
     }
 
     private String money(BigDecimal value) {
+        // 金额作为字符串返回，防止JSON/JavaScript二进制浮点损失金融小数。
         return value == null ? "0.00" : value.setScale(2, RoundingMode.HALF_UP).toPlainString();
     }
 

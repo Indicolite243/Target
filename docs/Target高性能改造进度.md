@@ -113,6 +113,38 @@
 - 第二份`strategies/ETF_momentum_rotation.py`趋势轮动策略已完成双平台交叉验证：SuperMind/Target策略收益分别为-4.81%/-4.78%，年化-0.86%/-0.85%，最大回撤34.48%/34.49%；Alpha、Beta、Sharpe、Sortino、信息比率、波动率、跟踪误差和下行风险均对齐到页面展示精度。该策略包含66笔Target成交和多次权益ETF/债券ETF切换，证明内核不是针对第一份策略特调。用户已确认本阶段通过。
 - Python模块在FastAPI进程启动时载入；修改`mindgo_runner.py`或`backtest_service.py`后必须重启8000端口服务。曾出现13:44启动的旧FastAPI继续返回旧基准与旧截止日期，重启后同一`test.py`恢复为沪深300指数基准11.71%、截止2025-12-01和最终净值952,234.70元。
 
+### 阶段13：后端源码注释与交接文档
+
+- 已为`backend/src/main/java`下100个Java源文件补齐类型级Javadoc，覆盖控制器、配置、安全认证、实体、DTO/VO、Mapper、服务接口、缓存、QMT集成、任务工作线程、调度器及持久化组件。
+- 7个`service/impl`实现类已重点补充完整注释：说明方法职责、参数和返回值，并解释事务边界、Redis/MySQL数据来源、QMT外部调用、订单不确定状态、金额精度、异步任务以及历史/实时口径等关键设计理由。
+- 所有`public/protected`方法均已补齐紧邻声明的Javadoc；复杂私有辅助方法同步说明前置条件、计算公式、副作用、失败语义和性能考虑，便于后续会话快速定位真实业务链路。
+- 本阶段仅改善代码可读性和可维护性，不修改业务逻辑、接口协议、数据库结构或运行配置。
+- 已通过`mvn test -q`验证，并使用Maven Javadoc插件成功生成`backend/target/reports/apidocs/index.html`。
+
+### 阶段14：Quant-Service核心源码中文注释
+
+- 已覆盖`quant-service/app`下全部17个核心Python文件，包括FastAPI入口、环境配置、6组Pydantic协议模型、QMT账户/行情/订单适配、组合历史重建、风险计算、Mock适配、回测任务调度与MindGo/SuperMind撮合内核。
+- 每个模块、类、函数和异步函数均有中文docstring；关键语句和分支进一步说明数据来源、锁与单例生命周期、QMT连接/订阅/首tick处理、账号和交易开关校验、金额精度、异常语义、缓存单飞、文件隔离、子进程超时及结果协议。
+- `qmt_account_service.py`重点解释QMT动态加载、长连接复用、SDK串行锁、字段兼容、资产与持仓一致性、行情批量订阅、模拟下单撤单、错误分类和敏感信息脱敏。
+- `mindgo_runner.py`重点解释原始/前复权行情职责、动态复权锚点、开盘撮合与收盘估值、整手/现金/成交量限制、佣金滑点、公司行动、策略生命周期和SuperMind风险指标公式。
+- 本阶段只增加或翻译注释，不调整接口、计算公式、QMT调用、撮合逻辑和运行配置。`python -m compileall -q app`通过，项目虚拟环境内26项Pytest全部通过。
+
+### 阶段15：trade.order订单业务源码中文注释
+
+- 已覆盖`backend/src/main/java/com/stockmanager/trade/order`下的Controller、DTO、Entity、Mapper、Service、ServiceImpl、状态策略、定时对账器和VO。
+- `OrderServiceImpl`重点标注了“幂等查询 → 账户归属/环境校验 → 本地PENDING_SUBMIT意图 → 事务外Quant/QMT调用 → 成功/拒绝/UNKNOWN回写”的完整链路，并解释分页、软删除、撤单、批量状态对账、跨日收敛和时间线组装。
+- `OrderStatePersistenceService`重点标注了短事务边界、状态历史与审计的原子写入、QMT状态归一化、CANCEL_PENDING防回退、成交数量精度和重复轮询不写库等设计。
+- DTO/Entity/VO/Mapper/调度器补充字段级和方法级中文说明，明确Snowflake ID字符串化、BigDecimal精度、MyBatis-Plus通用CRUD、软删除不等于撤单以及定时任务锁语义。
+- 本阶段只增加中文注释，不改变订单接口、状态迁移、数据库SQL或QMT调用行为；`mvn -q -DskipTests compile`和`mvn -q test`均通过。
+- `integration.quant.QuantClient`进一步补齐逐行中文注释：解释实时/长耗时双RestClient、连接与读取超时、内部认证及链路请求头、统一响应拆包、4xx明确拒绝与5xx/超时不确定结果的区别，以及multipart回测文件上传；未增加自动重试或改变HTTP协议。
+
+### 阶段16：market实时行情源码中文注释
+
+- 已覆盖`backend/src/main/java/com/stockmanager/market`下的Controller、Service接口、ServiceImpl和Redis缓存组件。
+- 逐行说明证券代码清洗与100只上限、`allowStale`缓存策略、Redis命中与缺口列表、一次批量FastAPI/QMT回源、上游弱类型Map转换、按请求顺序恢复结果、行情Key规范化及毫秒级TTL。
+- 明确Redis仅为加速层：缓存缺失、过期、脏JSON或连接异常均降级到QMT，写缓存失败不影响当前行情响应；本阶段未改变接口、缓存时长或上游请求协议。
+- `mvn -q -DskipTests compile`和`mvn -q test`均通过。
+
 ## 2026-08-26 本轮改动核对
 
 - 订单后端链路已逐项核对：`OrderController`日期参数与删除路由、`OrderService/OrderServiceImpl`日期查询和软删除保护、`TradeOrder.deletedAt`实体映射、`accountApi.js`删除请求均与V11表结构一致。
@@ -121,6 +153,13 @@
 - 本轮重新验证：`backend`执行`mvn -q test`通过；`quant-service`使用项目`.venv`执行26项测试全部通过；`frontend`生产构建通过，`OrderList.vue`、`OrderModule.vue`和`accountApi.js`定向ESLint通过。
 - 运行态只读核对：Flyway V11成功记录为1条，`trade_order.deleted_at`字段和`idx_trade_order_user_created_deleted`索引均存在；Spring健康状态为`UP`；FastAPI为QMT模式且QMT已连接、已订阅。
 - 已知语义限制：订单工具栏的关键词和状态标签当前只过滤前端表格；“清空当前筛选”批量接口只接收日期范围，因此实际含义是“清空当前日期范围内的终态历史记录”。上线前应选择补充后端关键词/状态过滤参数，或将按钮改名为“清空当前日期范围”。
+
+## 2026-08-28 撤单状态收敛修复
+
+- 修复撤单确认中的订单被QMT短暂返回的旧`REPORTED/PARTIALLY_FILLED`状态回退为`SUBMITTED`的问题；`CANCEL_PENDING`现在只会被明确的`FILLED/CANCELED/REJECTED/FAILED`终态结束，避免重复开放撤单形成状态循环。
+- QMT委托查询只返回当日数据。后台查询成功但找不到上一日`CANCEL_PENDING`订单时，将其保守收敛为`CANCELED`；普通`SUBMITTED/UNKNOWN`订单不会仅凭列表缺失被武断判定。
+- 全量后端测试通过，并新增状态策略和持久化单元测试，覆盖旧状态防回退、券商明确终态、跨日撤单收敛及恢复为可删除终态。
+- 运行态已验证：订单`2092939243915558914`由`CANCEL_PENDING`自动收敛为`CANCELED`，成交数量保持0，状态历史来源为`QMT_CROSS_DAY_RECONCILE`，同时写入`CROSS_DAY_RECONCILED`审计事件；Spring健康状态为`UP`。
 
 ## 尚未实施
 

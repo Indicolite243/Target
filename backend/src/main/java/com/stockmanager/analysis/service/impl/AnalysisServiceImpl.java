@@ -21,15 +21,25 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 账户分析/归因门面：负责选择数据口径、调用历史数据服务，并把 Python/QMT 的原始结果
+ * 转成前端稳定的中文业务结构。这里不直接修改账户和持仓，只生成分析结果。
+ */
 @Service
 public class AnalysisServiceImpl implements AnalysisService {
+    /** 小数比率转百分数时使用的固定乘数，避免重复创建 BigDecimal。 */
     private static final BigDecimal HUNDRED = new BigDecimal("100");
 
+    /** 读取账户资产摘要并执行用户归属校验。 */
     private final AccountMapper accountMapper;
+    /** 读取当前持仓，用于配置分布和 QMT 当前盈亏归因。 */
     private final PositionMapper positionMapper;
+    /** 读取 MySQL 不可变历史快照，支持真实时间段对比和历史归因。 */
     private final AccountSnapshotHistoryService snapshotHistoryService;
+    /** 请求 Python/QMT 历史行情，执行“固定当前持仓穿越历史”的模拟回放。 */
     private final QuantClient quantClient;
 
+    /** 注入当前账户持仓、历史快照和量化服务访问依赖。 */
     public AnalysisServiceImpl(AccountMapper accountMapper, PositionMapper positionMapper,
                                AccountSnapshotHistoryService snapshotHistoryService,
                                QuantClient quantClient) {
@@ -39,8 +49,15 @@ public class AnalysisServiceImpl implements AnalysisService {
         this.quantClient = quantClient;
     }
 
+    /**
+     * 计算当前账户的资产配置分布。
+     *
+     * <p>该接口只使用当前账户/持仓事实，不回放历史行情。返回结构同时保留新旧前端字段名，
+     * 便于改造期间平滑迁移。</p>
+     */
     @Override
     public Map<String, Object> allocation(Long userId, Long accountId, String dimension, String source) {
+        // 资产配置是当前快照分析：持仓来自 MySQL 当前表，source 只用于标识数据来源口径。
         Account account = requireAccount(userId, accountId);
         List<Position> positions = positions(accountId);
         List<Map<String, Object>> positionRows = positionRows(positions);
@@ -66,10 +83,19 @@ public class AnalysisServiceImpl implements AnalysisService {
         return result;
     }
 
+    /**
+     * 计算时间区间对比，可选择真实 MySQL 快照收益或固定当前持仓的历史行情模拟收益。
+     */
     @Override
     public Map<String, Object> periodComparison(Long userId, Long accountId, String periodType,
                                                 String from, String to, String granularity,
                                                 String calculationMode, String traceId) {
+        /*
+         * 两种收益口径必须明确区分：
+         * SNAPSHOT  = 读取区间内实际历史账户快照；
+         * SIMULATED = 固定当前持仓/现金，调用量化服务回放历史行情。
+         * 前端同时展示结果和 calculation_method，避免把“模拟穿越收益”误认为真实净值。
+         */
         Account account = requireAccount(userId, accountId);
         LocalDate end = parseDate(to, LocalDate.now());
         int defaultDays = "WEEK".equals(periodType) ? 7 : 365;
@@ -120,6 +146,7 @@ public class AnalysisServiceImpl implements AnalysisService {
      */
     private Map<String, Object> historicalPositionReplay(Account account, LocalDate start,
                                                          LocalDate end, String traceId) {
+        // 只把当前仍持有的正数量仓位注入 Python；空仓位会造成无意义的价格请求和噪声。
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("accountId", text(account.getAccountNo(), String.valueOf(account.getId())));
         request.put("startDate", start.toString());
@@ -147,9 +174,16 @@ public class AnalysisServiceImpl implements AnalysisService {
         return quantClient.portfolioHistory(request, traceId);
     }
 
+    /**
+     * 计算证券和行业维度的收益贡献。
+     *
+     * <p>当前 QMT 口径使用最近一次同步的持仓盈亏；历史口径使用 MySQL 中的持仓快照序列。
+     * 两种口径在返回值中明确携带来源和计算方法，避免前端误解。</p>
+     */
     @Override
     public Map<String, Object> attribution(Long userId, Long accountId, String dimension,
                                            String source, String from, String to, String traceId) {
+        // QMT 口径取当前持仓盈亏；历史口径取每日历史持仓，再按标的和行业聚合贡献。
         Account account = requireAccount(userId, accountId);
         LocalDate end = parseDate(to, LocalDate.now());
         LocalDate start = parseDate(from, end.minusDays(30));
@@ -168,6 +202,7 @@ public class AnalysisServiceImpl implements AnalysisService {
         int positive = 0;
         int negative = 0;
         for (Map<String, Object> raw : rawPositions) {
+            // contribution 以组合总市值为分母，returnRate 以该标的起始价为分母；两者含义不同。
             BigDecimal marketValue = decimal(raw.get("marketValue"));
             BigDecimal pnl = decimal(raw.get("periodPnl"));
             BigDecimal startPrice = decimal(raw.get("startPrice"));
@@ -270,6 +305,9 @@ public class AnalysisServiceImpl implements AnalysisService {
         return history;
     }
 
+    /**
+     * 将当前持仓转换为资产配置表行，并计算权重、持仓收益率等派生字段。
+     */
     private List<Map<String, Object>> positionRows(List<Position> positions) {
         BigDecimal total = positions.stream().map(Position::getMarketValue).map(this::zero)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -296,6 +334,7 @@ public class AnalysisServiceImpl implements AnalysisService {
                 }).toList();
     }
 
+    /** 按资产类别、行业或交易市场聚合市值与盈亏。 */
     private List<Map<String, Object>> groupedAllocation(Account account, List<Position> positions, String dimension) {
         Map<String, BigDecimal> values = new LinkedHashMap<>();
         Map<String, BigDecimal> profits = new LinkedHashMap<>();
@@ -324,6 +363,7 @@ public class AnalysisServiceImpl implements AnalysisService {
         }).toList();
     }
 
+    /** 按交易市场聚合市值、成本和收益率，供分市场对比展示。 */
     private List<Map<String, Object>> regionRows(List<Position> positions) {
         Map<String, BigDecimal> values = new LinkedHashMap<>();
         Map<String, BigDecimal> costs = new LinkedHashMap<>();
@@ -344,11 +384,13 @@ public class AnalysisServiceImpl implements AnalysisService {
         }).sorted(Comparator.comparing((Map<String, Object> row) -> decimal(row.get("totalAssets"))).reversed()).toList();
     }
 
+    /** 从 MySQL 历史快照服务读取统一的组合历史结构。 */
     private Map<String, Object> portfolioHistory(Account account, LocalDate start, LocalDate end,
                                                  String granularity) {
         return snapshotHistoryService.portfolioHistory(account.getId(), start, end, granularity);
     }
 
+    /** 按账户和用户联合校验资源归属。 */
     private Account requireAccount(Long userId, Long accountId) {
         Account account = accountMapper.selectOne(Wrappers.<Account>lambdaQuery()
                 .eq(Account::getId, accountId).eq(Account::getUserId, userId));
@@ -356,18 +398,24 @@ public class AnalysisServiceImpl implements AnalysisService {
         return account;
     }
 
+    /** 读取账户当前持仓事实表。 */
     private List<Position> positions(Long accountId) {
         return positionMapper.selectList(Wrappers.<Position>lambdaQuery().eq(Position::getAccountId, accountId));
     }
 
+    /** 根据券商类型生成可供前端识别的数据来源标记。 */
     private String qmtSource(Account account) {
         return "GUOJIN_QMT".equalsIgnoreCase(account.getBroker()) ? "qmt_live" : "mysql";
     }
 
+    /** 优先使用持仓已保存行业，缺失时按证券名称和代码做展示级推断。 */
     private String industry(Position position) {
         return blank(position.getIndustry(), inferIndustry(position.getSecurityName(), position.getSecurityCode()));
     }
 
+    /**
+     * 为旧持仓补齐行业展示值。该规则仅用于页面分类，不属于正式证券主数据。
+     */
     private String inferIndustry(String nameValue, String codeValue) {
         String name = blank(nameValue, "");
         String code = blank(codeValue, "");
@@ -389,11 +437,13 @@ public class AnalysisServiceImpl implements AnalysisService {
         return "其他";
     }
 
+    /** 判断文本是否包含任意一个候选片段。 */
     private boolean contains(String value, String... fragments) {
         for (String fragment : fragments) if (value.contains(fragment)) return true;
         return false;
     }
 
+    /** 优先使用持仓市场字段，否则根据证券代码后缀推断交易市场。 */
     private String region(Position position) {
         if (position.getRegion() != null && !position.getRegion().isBlank()) return position.getRegion();
         String code = blank(position.getSecurityCode(), "").toUpperCase();
@@ -403,36 +453,48 @@ public class AnalysisServiceImpl implements AnalysisService {
         return "其他市场";
     }
 
+    /** 解析 ISO 日期；空值或非法值使用业务默认日期。 */
     private LocalDate parseDate(String value, LocalDate fallback) {
         try { return value == null || value.isBlank() ? fallback : LocalDate.parse(value); }
         catch (Exception ignored) { return fallback; }
     }
 
+    /** 从弱类型响应中筛选 Map 列表，忽略无法识别的元素。 */
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> mapList(Object value) {
         return value instanceof List<?> list ? list.stream()
                 .filter(Map.class::isInstance).map(item -> (Map<String, Object>) item).toList() : List.of();
     }
 
+    /** 将可空金额归一化为零，简化后续 BigDecimal 运算。 */
     private BigDecimal zero(BigDecimal value) { return value == null ? BigDecimal.ZERO : value; }
+    /** 将任意上游数值转换为 BigDecimal；非法值按零处理以保持展示接口可用。 */
     private BigDecimal decimal(Object value) {
         try { return new BigDecimal(String.valueOf(value)); } catch (Exception ignored) { return BigDecimal.ZERO; }
     }
+    /** 计算百分比值，分母为零时返回零。 */
     private BigDecimal ratio(BigDecimal value, BigDecimal total) {
         return total.signum() == 0 ? BigDecimal.ZERO : value.multiply(HUNDRED).divide(total, 6, RoundingMode.HALF_UP);
     }
+    /** 金额统一保留两位小数。 */
     private String money(BigDecimal value) { return value.setScale(2, RoundingMode.HALF_UP).toPlainString(); }
+    /** 计算并格式化两位百分比。 */
     private String percentage(BigDecimal value, BigDecimal total) { return ratio(value, total).setScale(2, RoundingMode.HALF_UP).toPlainString(); }
+    /** 分析数值最多保留四位小数并移除尾零。 */
     private BigDecimal number(BigDecimal value) { return value.setScale(4, RoundingMode.HALF_UP).stripTrailingZeros(); }
+    /** 从弱类型值读取非空文本。 */
     private String text(Object value, String fallback) { return value == null || String.valueOf(value).isBlank() ? fallback : String.valueOf(value); }
+    /** 从字符串读取非空文本。 */
     private String blank(String value, String fallback) { return value == null || value.isBlank() ? fallback : value; }
 
+    /** 行业归因聚合器，累加贡献率、盈亏、市值和证券数量。 */
     private static final class IndustryBucket {
         private BigDecimal contribution = BigDecimal.ZERO;
         private BigDecimal pnl = BigDecimal.ZERO;
         private BigDecimal marketValue = BigDecimal.ZERO;
         private int count;
 
+        /** 合并一条证券归因数据。 */
         private void add(BigDecimal contributionValue, BigDecimal pnlValue, BigDecimal marketValueValue) {
             contribution = contribution.add(contributionValue);
             pnl = pnl.add(pnlValue);

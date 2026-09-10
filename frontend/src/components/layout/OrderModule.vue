@@ -119,12 +119,14 @@ const selectedAccountInfo = computed(() => {
   return accounts.value.find((acc) => acc.account_id === selectedAccount.value) || { cash: 0 }
 })
 const selectedAccountDisplay = computed(() => selectedAccountInfo.value.display_account_id || selectedAccount.value || '-')
+// 买入上限由最新委托价和账户可用资金共同决定，并始终按 100 股整手向下取整。
 const maxBuyVolume = computed(() => {
   const price = Number(buyPrice.value)
   const cash = Number(selectedAccountInfo.value.cash || 0)
   if (!Number.isFinite(price) || price <= 0) return 0
   return Math.floor(cash / price / 100) * 100
 })
+// 卖出上限取当前证券的可卖数量，而不是持仓总量，遵循 T+1/冻结数量后的 available 字段。
 const maxSellVolume = computed(() => {
   const symbol = normalizeStockCode(selectedStock.value?.stock_code || stockKeyword.value)
   if (!symbol) return 0
@@ -137,9 +139,7 @@ const maxSellVolume = computed(() => {
 const quantityLimit = computed(() => quantitySide.value === 'BUY' ? maxBuyVolume.value : maxSellVolume.value)
 const estimatedAmount = computed(() => formatMoney(Number(buyPrice.value || 0) * Number(buyVolume.value || 0)))
 
-// Account/position data can finish loading after the quote request. Reapply
-// the selected ratio whenever the available limit becomes available so the
-// ticket is calculated from the first search click instead of a second one.
+// 账户/持仓可能比行情请求晚返回。上限变化后重新应用当前比例，保证第一次搜索最终也能算出数量。
 watch([quantityLimit, selectedRatio, quantitySide], () => {
   if (ratioValue(selectedRatio.value) > 0 && (buyVolume.value === 0 || buyVolume.value === lastAutoVolume.value)) {
     applyRatio(selectedRatio.value)
@@ -196,6 +196,10 @@ onBeforeUnmount(() => {
 })
 
 async function searchStock() {
+  /*
+   * 一次搜索点击要完成“代码解析 -> QMT行情 -> 证券名称/五档 -> 委托票据”的完整链路。
+   * MiniQMT 的首次订阅可能先返回价格为 0 的元数据，所以这里等待完整行情，避免用户必须点第二次。
+   */
   if (searching.value) return
   const keyword = stockKeyword.value.trim()
   if (!keyword) {
@@ -257,6 +261,7 @@ async function searchStock() {
 }
 
 async function fetchQuoteUntilComplete(keyword) {
+  // 重试发生在同一次搜索请求内，而不是要求用户重复点击；每次请求都绕过短期旧行情。
   let response = null
   for (let attempt = 0; attempt < 6; attempt += 1) {
     response = await fetchGuojinSimQuote(keyword, { allowStale: false })
@@ -267,6 +272,7 @@ async function fetchQuoteUntilComplete(keyword) {
 }
 
 function isCompleteQuote(data, keyword) {
+  // “完整”至少需要有效最新价、真实证券名称，以及一档买卖盘口中的任意一侧。
   const quoteData = data?.data || data || {}
   const symbol = normalizeStockCode(quoteData.stock_code ?? quoteData.symbol ?? keyword)
   const name = String(quoteData.stock_name ?? quoteData.name ?? '').trim()
@@ -302,6 +308,7 @@ function scheduleNextQuoteRefresh() {
 }
 
 async function refreshSelectedQuote() {
+  // 搜索完成后按前台 1 秒、后台 5 秒刷新盘口；同一时间只允许一个刷新请求。
   const symbol = selectedStock.value?.stock_code
   if (!symbol || quoteRefreshInFlight) return
   quoteRefreshInFlight = true
@@ -338,6 +345,7 @@ async function refreshSelectedQuote() {
 }
 
 function syncTicketFromQuote(quoteData, force = false) {
+  // 优先使用卖一作为买入参考价，没有卖一时才退回最新价；价格更新后立即重算数量比例。
   const bestAsk = Number(quoteData?.ask_prices?.[0] ?? quoteData?.askPrices?.[0] ?? 0)
   const latest = Number(quoteData?.latest ?? quoteData?.lastPrice ?? quoteData?.price ?? 0)
   const targetPrice = bestAsk > 0 ? bestAsk : latest
@@ -351,14 +359,17 @@ function syncTicketFromQuote(quoteData, force = false) {
 }
 
 function applyRatio(ratio) {
+  // 比例针对“当前方向的可交易上限”计算，并按 A 股 100 股整手向下取整。
   const percent = ratioValue(ratio)
   if (!Number.isFinite(percent) || percent <= 0) return
+  // quantityLimit 会随着账户、价格和买卖方向异步变化，因此每次点击都重新读取最新上限。
   const volume = lotFloor(quantityLimit.value * percent)
   lastAutoVolume.value = volume
   setOrderVolume(volume)
 }
 
 function syncBuyPriceFromInput() {
+  // 用户手动输入价格时只更新委托价，不自动覆盖用户已经手动修改的数量。
   const value = Number(buyPriceInput.value)
   if (!Number.isFinite(value) || value <= 0) {
     buyPrice.value = 0
@@ -378,6 +389,7 @@ function adjustBuyPrice(delta) {
 }
 
 function syncBuyVolumeFromInput() {
+  // 用户手动输入数量时统一按整手修正，最终提交前还会再次校验。
   const value = Number(buyVolumeInput.value)
   if (!Number.isFinite(value) || value <= 0) {
     buyVolume.value = 0
@@ -397,6 +409,7 @@ function adjustBuyVolume(delta) {
 
 
 function fillMax() {
+  // “全部”只填入当前方向允许的最大数量，不绕过整手和可用数量限制。
   setOrderVolume(quantityLimit.value)
 }
 
@@ -425,6 +438,10 @@ function submitSelectedSide() {
 }
 
 async function submitBuy() {
+  /*
+   * 买入按钮只负责校验和组装前端请求；订单幂等、QMT 调用、UNKNOWN 状态和审计由 Spring 负责。
+   * submitting 标志防止用户在同一请求尚未返回时重复点击。
+   */
   if (!tradeEnabled.value) return ElMessage.warning(tradeDisabledMessage.value)
   const accountId = selectedAccount.value
   if (!accountId) return ElMessage.warning('当前未获取到可用账户')
@@ -461,6 +478,7 @@ async function submitBuy() {
 }
 
 async function submitSell() {
+  // 卖出与买入共用同一套价格/数量校验，但 side=SELL 由 API 层明确传入，不能靠按钮文案推断。
   if (!tradeEnabled.value) return ElMessage.warning(tradeDisabledMessage.value)
   const accountId = selectedAccount.value
   if (!accountId) return ElMessage.warning('当前未获取到可用账户')

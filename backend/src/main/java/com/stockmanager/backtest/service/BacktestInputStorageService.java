@@ -18,7 +18,19 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Stream;
 
-/** Moves request-scoped uploads to a task-owned directory before asynchronous execution begins. */
+/**
+ * 回测输入文件的安全暂存边界。
+ *
+ * <pre>
+ * Multipart 请求 --校验类型/大小/日期--> runtime/backtests/{taskId}/input
+ *                                              |
+ *                                              +--> Worker 只消费本地 Path
+ *                                              +--> 任务清理时整目录删除
+ * </pre>
+ *
+ * 异步任务不能依赖请求结束后仍然存在的 MultipartFile，因此必须在返回 202
+ * 之前把文件复制到任务专属目录；目录名只由服务端 taskId 生成，避免路径穿越。
+ */
 @Service
 public class BacktestInputStorageService {
     private final Path storageRoot;
@@ -26,6 +38,7 @@ public class BacktestInputStorageService {
     private final long maxMarketFileBytes;
     private final long maxMarketTotalBytes;
 
+    /** 读取并规范化存储根目录以及策略、行情文件大小上限。 */
     public BacktestInputStorageService(@Value("${app.backtest.storage-root:../runtime/backtests}") String storageRoot,
                                        @Value("${app.backtest.max-strategy-bytes:5242880}") long maxStrategyBytes,
                                        @Value("${app.backtest.max-market-file-bytes:20971520}") long maxMarketFileBytes,
@@ -36,15 +49,20 @@ public class BacktestInputStorageService {
         this.maxMarketTotalBytes = maxMarketTotalBytes;
     }
 
+    /**
+     * 校验并暂存任务输入，只有全部文件复制成功后才返回可供 Worker 消费的路径集合。
+     */
     public BacktestInput stage(Long taskId, MultipartFile strategyFile, List<MultipartFile> marketFiles,
                                LocalDate startDate, LocalDate endDate, String engineType,
                                String benchmarkSymbol, boolean bearProtection) {
+        // 先完整校验，再创建目录和复制文件，避免半成品任务进入队列。
         validate(strategyFile, marketFiles, startDate, endDate);
         Path taskDir = storageRoot.resolve(String.valueOf(taskId)).normalize();
         if (!taskDir.startsWith(storageRoot)) throw new BusinessException(400702, "非法回测任务目录", HttpStatus.BAD_REQUEST);
         Path inputDir = taskDir.resolve("input");
         try {
             Files.createDirectories(inputDir);
+            // 策略文件统一落为 strategy.py；原始名称只用于结果展示，不能决定执行路径。
             String strategyName = safeName(strategyFile.getOriginalFilename(), "strategy.py");
             Path strategyPath = inputDir.resolve("strategy.py");
             Files.copy(strategyFile.getInputStream(), strategyPath, StandardCopyOption.REPLACE_EXISTING);
@@ -52,6 +70,7 @@ public class BacktestInputStorageService {
             Set<String> marketNames = new HashSet<>();
             for (MultipartFile marketFile : marketFiles == null ? List.<MultipartFile>of() : marketFiles) {
                 if (marketFile == null || marketFile.isEmpty()) continue;
+                // 同名行情文件会覆盖输入，直接拒绝比静默覆盖更容易审计。
                 String marketName = safeName(marketFile.getOriginalFilename(), "market.xlsx");
                 if (!marketNames.add(marketName.toLowerCase())) {
                     throw new BusinessException(400701, "行情文件名重复: " + marketName, HttpStatus.BAD_REQUEST);
@@ -72,7 +91,11 @@ public class BacktestInputStorageService {
     }
 
     /** Removes one task-owned runtime directory only after the caller has validated retention eligibility. */
+    /**
+     * 删除单个已结束任务的运行目录；路径必须严格位于配置的 storageRoot 下。
+     */
     public boolean deleteTaskDirectory(Long taskId) {
+        // 只允许删除 storageRoot 下的单个 taskId 目录；调用方应先判断保留策略。
         Path taskDir = storageRoot.resolve(String.valueOf(taskId)).normalize();
         if (!taskDir.startsWith(storageRoot) || taskDir.equals(storageRoot)) {
             throw new IllegalArgumentException("非法回测清理目录");
@@ -88,6 +111,7 @@ public class BacktestInputStorageService {
         }
     }
 
+    /** 在产生文件副作用前完成日期、文件类型、单文件大小和总大小校验。 */
     private void validate(MultipartFile strategyFile, List<MultipartFile> marketFiles,
                           LocalDate startDate, LocalDate endDate) {
         if (strategyFile == null || strategyFile.isEmpty()) {
@@ -120,14 +144,17 @@ public class BacktestInputStorageService {
         }
     }
 
+    /** 去除客户端路径，仅保留安全文件名；空名称使用后备值。 */
     private String safeName(String value, String fallback) {
         if (value == null || value.isBlank()) return fallback;
         String name = Path.of(value).getFileName().toString().replaceAll("[^a-zA-Z0-9._-]", "_");
         return name.isBlank() ? fallback : name;
     }
 
+    /** 空白配置值使用默认值。 */
     private String blank(String value, String fallback) { return value == null || value.isBlank() ? fallback : value; }
 
+    /** Worker 执行回测所需的不可变输入描述。 */
     public record BacktestInput(Long taskId, Path strategyPath, String strategyFilename, List<Path> marketPaths,
                                 LocalDate startDate, LocalDate endDate, String engineType,
                                 String benchmarkSymbol, boolean bearProtection, String runtimePath) {}

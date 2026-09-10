@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Target 后端登录与登出逻辑图</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 32px;
+      background: #ffffff;
+      color: #1f2937;
+      font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    }
+    h1 { margin: 0 0 24px; font-size: 28px; }
+    .mermaid { min-width: 2200px; }
+  </style>
+</head>
+<body>
+  <h1>Target 后端登录与登出逻辑图</h1>
+  <div class="mermaid">
+flowchart TD
+    CFG["application.yml<br/>app.jwt.secret<br/>app.jwt.expiration-seconds<br/>默认 2592000 秒（30 天）"]
+    CFG --> JS0["JwtService 构造器<br/>@Value 注入 secret、expirationSeconds"]
+    JS0 --> JS1["启动校验<br/>密钥至少 32 字节<br/>有效期必须大于 0"]
+
+    A["HTTP：POST /api/v1/auth/login"] --> B["TraceIdFilter<br/>生成或复用 traceId"]
+    B --> C["SecurityConfig<br/>/auth/login 属于 permitAll"]
+    C --> D["AuthController.login()<br/>AuthController.java"]
+    D --> E["@Valid 校验 LoginRequest<br/>username、password 非空"]
+    E --> F["AuthServiceImpl.login()<br/>AuthServiceImpl.java"]
+    F --> G["UserMapper.selectOne()<br/>按 username 查询"]
+    G --> H[("MySQL：sys_user<br/>id、username、password_hash<br/>role_code、status")]
+
+    H --> I{"用户存在且<br/>passwordEncoder.matches()<br/>密码正确？"}
+    I -->|否| I1["BusinessException<br/>401001：用户名或密码错误"]
+    I -->|是| J{"status == ACTIVE？"}
+    J -->|否| J1["BusinessException<br/>403001：账号不可用"]
+    J -->|是| K["JwtService.issue(userId, username, role)"]
+
+    JS1 --> K
+    K --> L["Jwts.builder() 构造 Claims"]
+    L --> M["sub=userId<br/>username<br/>role<br/>jti=UUID<br/>iat=当前时间<br/>exp=当前时间+expirationSeconds"]
+    M --> N["signWith(key).compact()<br/>HMAC 签名生成 JWT"]
+    N --> O["AuthController 返回 LoginView<br/>accessToken、Bearer、expiresIn、user"]
+
+    P["后续受保护请求<br/>Authorization: Bearer JWT"] --> Q["JwtAuthenticationFilter.doFilterInternal()<br/>JwtAuthenticationFilter.java"]
+    Q --> R["JwtService.parse(JWT)<br/>验签并校验 exp"]
+    R --> S{"签名有效且未自然过期？"}
+    S -->|否| S1["clearContext()<br/>受保护接口拒绝访问"]
+    S -->|是| T["JwtTokenBlacklist.isRevoked(claims)"]
+    T --> U[("Redis 查询<br/>stock:auth:blacklist:{jti}")]
+    U --> V{"jti 命中黑名单？"}
+    V -->|否| W["创建 Authentication<br/>sub 作为 userId<br/>role 转为 ROLE_*"]
+    W --> X["写入 SecurityContext<br/>业务 Controller / Service 获取当前身份"]
+    V -->|是| S1
+
+    Y["HTTP：POST /api/v1/auth/logout<br/>携带当前 Bearer JWT"] --> Q
+    V -->|否，认证通过| Z["AuthController.logout()<br/>去掉 Bearer 前缀"]
+    Z --> ZA["AuthServiceImpl.logout(pureJwt)"]
+    ZA --> ZB["JwtService.parse(pureJwt)<br/>读取 jti、exp"]
+    ZB --> ZC["JwtTokenBlacklist.revoke(claims)"]
+    ZC --> ZD[("Redis 写入<br/>stock:auth:blacklist:{jti} = 1")]
+    ZD --> ZE["TTL = exp - 当前时间<br/>只保留到 JWT 原本自然过期"]
+    ZE --> ZF["返回退出成功"]
+
+    ZF --> ZG["同一旧 JWT 再次请求"]
+    ZG --> Q
+
+    EXP["JWT 到达 exp"] --> EXPA["JwtService.parse() 抛出过期异常"]
+    EXPA --> S1
+
+    classDef process fill:#e8f1ff,stroke:#2563eb,color:#111827,stroke-width:1px;
+    classDef store fill:#e8f7ed,stroke:#198754,color:#111827,stroke-width:1px;
+    classDef error fill:#fde8e8,stroke:#dc3545,color:#111827,stroke-width:1px;
+    class CFG,JS0,JS1,A,B,C,D,E,F,G,K,L,M,N,O,P,Q,R,T,W,X,Y,Z,ZA,ZB,ZC,ZE,ZF,ZG,EXP,EXPA process;
+    class H,U,ZD store;
+    class I1,J1,S1 error;
+  </div>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+      startOnLoad: true,
+      securityLevel: "loose",
+      theme: "base",
+      flowchart: { htmlLabels: true, curve: "basis", nodeSpacing: 35, rankSpacing: 55 }
+    });
+  </script>
+</body>
+</html>
