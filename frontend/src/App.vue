@@ -5,6 +5,7 @@
     <router-view />
     <!-- 模拟数据状态指示器 -->
     <MockDataIndicator v-if="showMenuBar" />
+    <InvestmentAssistant v-if="showMenuBar && assistantEnabled" />
     <!-- 动态背景粒子效果 -->
     <div class="background-particles">
       <div v-for="n in 50" :key="n" class="particle" :style="getParticleStyle()"></div>
@@ -17,6 +18,10 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import MenuBar from '@/components/layout/MenuBar.vue';
 import MockDataIndicator from '@/components/layout/MockDataIndicator.vue';
+import InvestmentAssistant from '@/components/assistant/InvestmentAssistant.vue'
+
+// 分阶段开发：显式启用后验证会话管理，模型链路验收后再默认开启。
+const assistantEnabled = import.meta.env.VITE_ASSISTANT_ENABLED === 'true'
 
 const route = useRoute()
 
