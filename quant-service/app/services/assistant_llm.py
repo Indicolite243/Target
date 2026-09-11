@@ -49,11 +49,18 @@ class QwenStreamingModel:
         self.transport = transport
 
     async def stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+        async for event in self.stream_events(messages):
+            if event["type"] == "delta":
+                yield event["text"]
+            elif event["type"] == "tool_calls":
+                raise AssistantModelError("模型意外请求了未启用的工具")
+
+    async def stream_events(self, messages: list[dict], tools: list[dict] | None = None) -> AsyncIterator[dict]:
         settings = self.settings
         if not settings.api_key.get_secret_value():
             raise AssistantModelError("千问密钥尚未配置")
-        if not messages or any(m.get("role") not in {"system", "user", "assistant"}
-                               or not isinstance(m.get("content"), str) for m in messages):
+        if not messages or any(m.get("role") not in {"system", "user", "assistant", "tool"}
+                               or not isinstance(m.get("content", ""), str) for m in messages):
             raise AssistantModelError("模型消息格式无效")
         payload = {
             "model": settings.model,
@@ -63,6 +70,9 @@ class QwenStreamingModel:
             "stream": True,
             "enable_thinking": False,
         }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         try:
             async with httpx.AsyncClient(
                 transport=self.transport,
@@ -79,6 +89,8 @@ class QwenStreamingModel:
                                  429: "千问调用频率或额度受限"}
                         raise AssistantModelError(hints.get(response.status_code, "千问服务请求失败"))
                     finished = False
+                    finish_reason = None
+                    tool_calls: dict[int, dict] = {}
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
                             continue
@@ -86,6 +98,18 @@ class QwenStreamingModel:
                         if raw == "[DONE]":
                             if not finished:
                                 raise AssistantModelError("模型未返回完成状态，回答可能不完整")
+                            if finish_reason == "tool_calls":
+                                calls = []
+                                for index in sorted(tool_calls):
+                                    call = tool_calls[index]
+                                    if not call["id"] or not call["name"]:
+                                        raise AssistantModelError("模型工具调用格式异常")
+                                    calls.append(call)
+                                if not calls:
+                                    raise AssistantModelError("模型未提供工具调用参数")
+                                yield {"type": "tool_calls", "calls": calls}
+                            else:
+                                yield {"type": "done"}
                             return
                         if not raw:
                             continue
@@ -96,10 +120,21 @@ class QwenStreamingModel:
                             # reasoning_content 不属于用户回答，不转发或持久化。
                             content = choice.get("delta", {}).get("content")
                             if isinstance(content, str) and content:
-                                yield content
+                                yield {"type": "delta", "text": content}
+                            for fragment in choice.get("delta", {}).get("tool_calls") or []:
+                                index = int(fragment.get("index", 0))
+                                current = tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                                if fragment.get("id"):
+                                    current["id"] = fragment["id"]
+                                function = fragment.get("function") or {}
+                                if function.get("name"):
+                                    current["name"] += function["name"]
+                                if function.get("arguments"):
+                                    current["arguments"] += function["arguments"]
                             reason = choice.get("finish_reason")
-                            if reason == "stop":
+                            if reason in {"stop", "tool_calls"}:
                                 finished = True
+                                finish_reason = reason
                             elif reason:
                                 raise AssistantModelError("模型回答未完整结束，请缩小问题范围后重试")
                     if not finished:

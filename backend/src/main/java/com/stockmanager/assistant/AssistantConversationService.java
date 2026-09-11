@@ -29,22 +29,32 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class AssistantConversationService {
     public static final String WELCOME = "我是你的个人投研助手。我可以读取当前账户的持仓、历史业绩归因和最近一次回测结果，帮助你发现组合结构、收益来源和策略风险，并结合本地知识库提供参考分析。你可以直接向我提问。";
     private static final String SYSTEM_PROMPT = """
-            你是 Target 投研助手，请使用中文回答。本阶段尚未接入用户账户、回测和本地知识库工具；
-            如果问题依赖这些数据，必须明确说明当前看不到实际数据，不得编造持仓、收益、行情或回测结论。
-            可以使用模型通用知识给出教育性参考，但须标明未结合用户数据且可能存在时效限制。
+            你是 Target 投研助手，请使用中文回答。只有当问题确实依赖当前账户或持仓时，才调用
+            get_current_portfolio_snapshot；普通知识问题不要调用。工具结果是会话冻结的 MySQL 最近确认快照，
+            不是实时行情。snapshotFrozenAt 只是本会话冻结数据的时间，描述数据截至时间时只能使用
+            sourceDataAsOf。当前尚未提供历史成交、业绩归因、回测或知识库工具，相关问题必须说明缺少数据。
+            使用通用知识时标明未由本地数据验证且可能存在时效限制，不得编造任何账户事实。
             不得声称已经下单、修改持仓、运行回测或写入策略文件。除非用户明确要求，否则不输出源码。
             """;
+    private static final List<AssistantModelGateway.ToolDefinition> PORTFOLIO_TOOLS = List.of(
+            new AssistantModelGateway.ToolDefinition("get_current_portfolio_snapshot",
+                    "读取当前登录用户唯一账户在 MySQL 中最近确认并冻结到本会话的账户总览、完整持仓与集中度指标。仅在问题依赖实际账户数据时调用。",
+                    Map.of("type", "object", "properties", Map.of(), "additionalProperties", false)));
     private final JdbcTemplate jdbc;
     private final AssistantModelGateway modelGateway;
+    private final AssistantPortfolioSnapshotService snapshotService;
     private final ExecutorService generationExecutor = Executors.newVirtualThreadPerTaskExecutor();
     private final ConcurrentHashMap<String, ActiveGeneration> active = new ConcurrentHashMap<>();
 
     @Autowired
-    public AssistantConversationService(JdbcTemplate jdbc, AssistantModelGateway modelGateway) {
+    public AssistantConversationService(JdbcTemplate jdbc, AssistantModelGateway modelGateway,
+                                        AssistantPortfolioSnapshotService snapshotService) {
         this.jdbc = jdbc;
         this.modelGateway = modelGateway;
+        this.snapshotService = snapshotService;
     }
-    AssistantConversationService(JdbcTemplate jdbc) { this(jdbc, null); }
+    AssistantConversationService(JdbcTemplate jdbc, AssistantModelGateway modelGateway) { this(jdbc, modelGateway, null); }
+    AssistantConversationService(JdbcTemplate jdbc) { this(jdbc, null, null); }
     public record Conversation(String id, String title, LocalDateTime createdAt, LocalDateTime updatedAt) {}
     public record Message(String id, String role, String content, String status, LocalDateTime createdAt) {}
 
@@ -71,7 +81,10 @@ public class AssistantConversationService {
     }
     public List<Message> messages(long userId, String id) {
         requireOwner(userId, id);
-        return jdbc.query("SELECT id,role,content,status,created_at FROM ai_message WHERE conversation_id=? ORDER BY created_at,id",
+        return jdbc.query("""
+                SELECT id,role,content,status,created_at FROM ai_message WHERE conversation_id=?
+                ORDER BY created_at,CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END,id
+                """,
                 (rs, n) -> new Message(rs.getString("id"), rs.getString("role"), rs.getString("content"),
                         rs.getString("status"), rs.getTimestamp("created_at").toLocalDateTime()), id);
     }
@@ -118,7 +131,7 @@ public class AssistantConversationService {
             jdbc.update("INSERT INTO ai_message(id,conversation_id,request_id,role,content,status,created_at) VALUES(?,?,?,?,?,?,?)",
                     userMessageId, id, requestId, "user", normalized, "PENDING", Timestamp.valueOf(now));
             jdbc.update("INSERT INTO ai_message(id,conversation_id,request_id,role,content,status,created_at) VALUES(?,?,?,?,?,?,?)",
-                    assistantMessageId, id, requestId, "assistant", "", "GENERATING", Timestamp.valueOf(now.plusNanos(1)));
+                    assistantMessageId, id, requestId, "assistant", "", "GENERATING", Timestamp.valueOf(now.plusNanos(1_000)));
             jdbc.update("UPDATE ai_conversation SET title=CASE WHEN title='新对话' THEN ? ELSE title END,updated_at=? WHERE id=? AND user_id=?",
                     normalized.substring(0, Math.min(normalized.length(), 30)), Timestamp.valueOf(now), id, userId);
             context.add(new AssistantModelGateway.ModelMessage("user", normalized));
@@ -164,7 +177,7 @@ public class AssistantConversationService {
                     SELECT 1 FROM ai_message paired
                     WHERE paired.conversation_id=m.conversation_id AND paired.request_id=m.request_id
                       AND paired.status='COMPLETED' AND paired.role<>m.role))
-                ORDER BY m.created_at DESC,m.id DESC LIMIT 40
+                ORDER BY m.created_at DESC,CASE m.role WHEN 'assistant' THEN 0 ELSE 1 END,m.id DESC LIMIT 40
                 """, (rs, n) -> new AssistantModelGateway.ModelMessage(rs.getString("role"), rs.getString("content")), conversationId);
         Collections.reverse(recent);
         result.addAll(recent);
@@ -173,16 +186,34 @@ public class AssistantConversationService {
 
     private void generate(ActiveGeneration generation, List<AssistantModelGateway.ModelMessage> context, String traceId) {
         try {
-            modelGateway.stream(context, traceId, event -> {
-                if (generation.cancelled.get()) return;
-                if ("delta".equals(event.type()) && event.text() != null) {
-                    generation.content.append(event.text());
-                    if (generation.content.length() - generation.persistedLength >= 512) persistPartial(generation);
-                    emit(generation.emitter, "delta", Map.of("text", event.text()));
-                } else if ("status".equals(event.type())) {
-                    emit(generation.emitter, "status", Map.of("phase", event.phase(), "message", event.message()));
+            emit(generation.emitter, "status", Map.of("phase", "SELECTING", "message", "正在判断所需数据"));
+            StringBuffer directAnswer = new StringBuffer();
+            AssistantModelGateway.StreamResult plan = modelGateway.stream(context, PORTFOLIO_TOOLS, traceId,
+                    event -> { if ("delta".equals(event.type()) && event.text() != null) directAnswer.append(event.text()); }, generation);
+            if (plan.requestedTools()) {
+                if (snapshotService == null) throw new QwenAssistantModelGateway.AssistantGatewayException("账户工具尚未配置");
+                emit(generation.emitter, "status", Map.of("phase", "READING_DATA", "message", "正在读取会话冻结的账户快照"));
+                context.add(AssistantModelGateway.ModelMessage.assistantTools(plan.toolCalls()));
+                AssistantPortfolioSnapshotService.FrozenSnapshot snapshot = snapshotService.getOrCreate(
+                        generation.userId, generation.conversationId);
+                generation.snapshotId = snapshot.id();
+                jdbc.update("UPDATE ai_message SET snapshot_id=? WHERE conversation_id=? AND request_id=?",
+                        snapshot.id(), generation.conversationId, generation.requestId);
+                for (AssistantModelGateway.ToolCall call : plan.toolCalls()) {
+                    String result = "get_current_portfolio_snapshot".equals(call.name())
+                            ? snapshot.modelJson() : "{\"available\":false,\"reason\":\"不允许的工具\"}";
+                    context.add(AssistantModelGateway.ModelMessage.toolResult(call, result));
                 }
-            }, generation);
+                emit(generation.emitter, "status", Map.of("phase", "GENERATING", "message", "正在结合账户快照生成回答"));
+                AssistantModelGateway.StreamResult finalResult = modelGateway.stream(context, List.of(), traceId,
+                        event -> acceptLiveEvent(generation, event), generation);
+                if (finalResult.requestedTools())
+                    throw new QwenAssistantModelGateway.AssistantGatewayException("模型重复请求了未开放工具");
+            } else {
+                if (directAnswer.isEmpty())
+                    throw new QwenAssistantModelGateway.AssistantGatewayException("模型没有返回回答");
+                acceptLiveEvent(generation, new AssistantModelGateway.ModelEvent("delta", directAnswer.toString(), null, null));
+            }
             if (generation.terminal.compareAndSet(false, true)) {
                 if (finishSafely(generation, "COMPLETED"))
                     emit(generation.emitter, "done", Map.of("status", "COMPLETED"));
@@ -198,6 +229,17 @@ public class AssistantConversationService {
             }
         } finally {
             active.remove(generation.conversationId, generation);
+        }
+    }
+
+    private void acceptLiveEvent(ActiveGeneration generation, AssistantModelGateway.ModelEvent event) {
+        if (generation.cancelled.get()) return;
+        if ("delta".equals(event.type()) && event.text() != null) {
+            generation.content.append(event.text());
+            if (generation.content.length() - generation.persistedLength >= 512) persistPartial(generation);
+            emit(generation.emitter, "delta", Map.of("text", event.text()));
+        } else if ("status".equals(event.type())) {
+            emit(generation.emitter, "status", Map.of("phase", event.phase(), "message", event.message()));
         }
     }
 
@@ -255,6 +297,7 @@ public class AssistantConversationService {
         private volatile int persistedLength;
         private volatile Closeable upstream;
         private volatile Future<?> future;
+        private volatile String snapshotId;
 
         private ActiveGeneration(long userId, String conversationId, String requestId, String userMessageId,
                                  String assistantMessageId, SseEmitter emitter) {

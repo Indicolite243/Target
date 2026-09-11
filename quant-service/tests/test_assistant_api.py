@@ -15,12 +15,13 @@ class FakeModel:
         self.fail = fail
         self.closed = False
 
-    async def stream(self, messages):
+    async def stream_events(self, messages, tools=None):
         try:
             assert messages[-1]["content"] == "你好"
-            yield "第一行\n第二行"
+            yield {"type": "delta", "text": "第一行\n第二行"}
             if self.fail:
                 raise AssistantModelError("模型连接提前结束，回答可能不完整")
+            yield {"type": "done"}
         finally:
             self.closed = True
 
@@ -92,11 +93,11 @@ def test_cancel_propagates_and_closes_model_stream():
         started = asyncio.Event()
 
         class WaitingModel(FakeModel):
-            async def stream(self, messages):
+            async def stream_events(self, messages, tools=None):
                 try:
                     started.set()
                     await asyncio.Event().wait()
-                    yield "must not be emitted"
+                    yield {"type": "delta", "text": "must not be emitted"}
                 finally:
                     self.closed = True
 

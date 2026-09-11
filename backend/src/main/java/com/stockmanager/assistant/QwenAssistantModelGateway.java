@@ -16,6 +16,8 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.Consumer;
 
@@ -42,11 +44,17 @@ public class QwenAssistantModelGateway implements AssistantModelGateway {
     }
 
     @Override
-    public void stream(List<ModelMessage> messages, String traceId,
-                       Consumer<ModelEvent> consumer, Cancellation cancellation) {
+    public StreamResult stream(List<ModelMessage> messages, List<ToolDefinition> tools, String traceId,
+                               Consumer<ModelEvent> consumer, Cancellation cancellation) {
         InputStream body = null;
         try {
-            String json = mapper.writeValueAsString(Map.of("messages", messages));
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("messages", messages.stream().map(this::messagePayload).toList());
+            if (tools != null && !tools.isEmpty()) {
+                payload.put("tools", tools.stream().map(tool -> Map.of("type", "function", "function", Map.of(
+                        "name", tool.name(), "description", tool.description(), "parameters", tool.parameters()))).toList());
+            }
+            String json = mapper.writeValueAsString(payload);
             HttpRequest request = HttpRequest.newBuilder(endpoint)
                     .timeout(Duration.ofSeconds(310))
                     .header("Content-Type", "application/json")
@@ -61,6 +69,7 @@ public class QwenAssistantModelGateway implements AssistantModelGateway {
             if (response.statusCode() != 200) throw new AssistantGatewayException("模型服务暂时不可用");
 
             boolean done = false;
+            List<ToolCall> calls = new ArrayList<>();
             String event = "";
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(body, StandardCharsets.UTF_8))) {
                 String line;
@@ -76,15 +85,21 @@ public class QwenAssistantModelGateway implements AssistantModelGateway {
                                     data.path("message").asText("正在生成回答")));
                         } else if ("done".equals(event)) {
                             done = true;
+                        } else if ("tool_calls".equals(event)) {
+                            for (JsonNode call : data.path("calls")) {
+                                calls.add(new ToolCall(call.path("id").asText(), call.path("name").asText(),
+                                        call.path("arguments").asText("{}")));
+                            }
                         } else if ("error".equals(event)) {
                             throw new AssistantGatewayException(data.path("message").asText("模型生成失败"));
                         }
                     }
                 }
             }
-            if (!cancellation.cancelled() && !done) {
+            if (!cancellation.cancelled() && !done && calls.isEmpty()) {
                 throw new AssistantGatewayException("模型连接提前结束，回答可能不完整");
             }
+            return new StreamResult(List.copyOf(calls));
         } catch (AssistantGatewayException exception) {
             throw exception;
         } catch (InterruptedException exception) {
@@ -97,6 +112,21 @@ public class QwenAssistantModelGateway implements AssistantModelGateway {
                 try { body.close(); } catch (IOException ignored) { }
             }
         }
+        return new StreamResult(List.of());
+    }
+
+    private Map<String, Object> messagePayload(ModelMessage message) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("role", message.role());
+        payload.put("content", message.content() == null ? "" : message.content());
+        if (message.toolCalls() != null) {
+            payload.put("tool_calls", message.toolCalls().stream().map(call -> Map.of(
+                    "id", call.id(), "type", "function", "function", Map.of(
+                            "name", call.name(), "arguments", call.arguments()))).toList());
+        }
+        if (message.toolCallId() != null) payload.put("tool_call_id", message.toolCallId());
+        if (message.name() != null) payload.put("name", message.name());
+        return payload;
     }
 
     public static class AssistantGatewayException extends RuntimeException {

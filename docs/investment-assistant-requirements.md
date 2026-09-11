@@ -11,7 +11,7 @@
 
 用户已学习 Java/Spring Boot、MySQL、Redis、RabbitMQ、Python、RAG、LangChain 基础、HelloAgents、Function Calling、MCP 与上下文工程。已有 Target 的 Vue 3 + Pinia + ECharts、Spring Boot 3/Java 21 和 FastAPI；已有黑马点评 RabbitMQ 可靠消息项目。
 
-复用现有 Vue、Spring Security/JWT、MyBatis-Plus、MySQL/Flyway、Redis 和 FastAPI。Java 管理身份、账户归属、会话、快照及流式网关；Python 独立 AI 模块负责模型调用、工具编排、检索与分析计算。保持 QMT 采集和 AI 长耗时处理隔离。
+复用现有 Vue、Spring Security/JWT、MyBatis-Plus、MySQL/Flyway、Redis 和 FastAPI。Java 管理身份、账户归属、会话、冻结快照、受控工具执行及流式网关；Python 独立 AI 模块负责千问调用和 Function Calling 协议适配，后续再承载检索与分析计算。保持 QMT 采集和 AI 长耗时处理隔离。
 
 借鉴 MewHelp 截图中的混合 RAG、RRF、重排、Function Calling、上下文管理与可观测性。第一阶段不引入 LangGraph、多 Agent、Milvus 集群、RoBERTa 微调或新消息队列。先以受控工具调用循环完成任务，RAG 使用可替换的向量检索适配器与 BM25，后续按数据规模选择存储。MCP 用于有跨客户端复用价值的只读工具，不为已有内部接口重复增加网络层。
 
@@ -70,17 +70,21 @@
 
 - 已新增 V12 会话/消息表迁移、按用户隔离的会话 CRUD 接口及固定欢迎消息。
 - 已新增全局悬浮面板、历史会话、新建、重命名、删除、关闭恢复；助手默认启用，可用 VITE_ASSISTANT_ENABLED=false 临时关闭。
-- 浏览器流式问答、持久化、阶段计时和主动停止已经接通；账户工具、快照和 RAG 尚未接通，不宣称已经完成投研数据分析。
+- 浏览器流式问答、持久化、阶段计时和主动停止已经接通；当前账户持仓工具与会话冻结快照已经接通，历史归因、回测和 RAG 尚未接通。
 - 用户已选择千问，沿用学习项目的 qwen3.7-plus，temperature=0.2；模型名称和地址可通过环境变量调整。
-- 本机 MySQL 已由 Flyway 成功执行 V12、V13，当前 schema 为 v13；迁移只新增助手表及消息 request_id。
+- 本机 MySQL 已由 Flyway 成功执行 V12、V13、V14，当前 schema 为 v14；V14 新增会话数据快照及消息到快照的追溯关系。
 - 临时 docs/diagram-test.png 保留本地，未纳入改造前备份。
 
 ### 千问适配进度（2026-09-11）
 
 - 已实现千问流式适配器和 `/internal/v1/assistant/stream`，后者沿用 Java/Python 内部令牌鉴权，不直接对浏览器开放。
-- 协议事件为 status、delta、done 或 error；失败保留已输出片段但不发送成功事件。过滤 reasoning_content，限制消息长度、总上下文和生成时间，关闭流时释放上游连接。
-- 真实 qwen3.7-plus 调用已通过，只发送固定连接测试问候，凭证从学习项目本地配置临时读取；没有复制密钥或发送资产数据。
+- 协议事件为 status、delta、tool_calls、done 或 error；失败保留已输出片段但不发送成功事件。过滤 reasoning_content，限制消息长度、总上下文和生成时间，关闭流时释放上游连接。
+- 真实 qwen3.7-plus 调用已通过；凭证从学习项目本地配置只读引用，没有复制密钥。持仓问答只发送分析所需的账户汇总、证券持仓和确定性集中度指标，不发送资金账号、账户名称、用户身份或系统内部主键。
 - Target 支持直接配置 DASHSCOPE_API_KEY，也支持用本机忽略文件只引用学习项目中的既有凭证；仓库不保存密钥。
 - 已完成浏览器三层真实联调：登录后显示固定欢迎语，千问逐步输出，正常回答持久化，关闭/重开内容不丢，刷新后恢复；停止后保留部分回答并标记不完整。
 - 联调发现并修正 JDK h2c 与 Uvicorn 的协议不兼容，以及 Spring SSE 异步 dispatcher 的 JWT 身份恢复问题。
-- Java 测试 30 项、前端专项测试 5 项、量化服务测试至少 37 项通过；下一步接账户只读工具与不可变会话快照。
+- 已实现 `get_current_portfolio_snapshot`：千问先判断是否需要业务数据，普通知识问题一次模型请求直接回答；持仓问题先返回工具调用，Java 校验当前用户后冻结/复用 MySQL 最近确认快照，再以工具结果发起第二次生成。
+- 快照记录源数据截至时间、冻结时间、数据版本、账户汇总、最多 300 个持仓、Top1/Top3/Top5、现金占比和盈亏持仓数量；明确区分数据截至时间与快照冻结时间，不触发 QMT 同步。
+- 同一会话首次读取后复用同一快照。当前阶段尚未提供“刷新本会话快照”入口，历史成交、归因、最近回测和知识库请求会如实说明能力缺失。
+- 真实浏览器验证：通用最大回撤问题未调用账户工具；实际持仓问题引用 31 个持仓及 Top1/Top3/Top5；源数据时间与资产页一致，并标注 MySQL 最近确认快照、非实时行情。消息顺序、刷新恢复和底部能力提示均已复查。
+- Java 测试 32 项、前端专项测试 5 项、量化服务测试 39 项通过；下一步接最近回测与源码工具，再接历史归因和方法论 RAG。

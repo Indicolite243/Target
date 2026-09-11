@@ -35,11 +35,12 @@ class AssistantConversationServiceTests {
     @Test void completedPairIsPersistedAndPartialTextIsNotLost() throws Exception {
         JdbcTemplate jdbc = preparedJdbc();
         CountDownLatch generated = new CountDownLatch(1);
-        AssistantModelGateway gateway = (messages, traceId, consumer, cancellation) -> {
+        AssistantModelGateway gateway = (messages, tools, traceId, consumer, cancellation) -> {
             assertEquals("system", messages.getFirst().role());
             assertEquals("当前组合怎么样", messages.getLast().content());
             consumer.accept(new AssistantModelGateway.ModelEvent("delta", "尚未接入账户数据。", null, null));
             generated.countDown();
+            return new AssistantModelGateway.StreamResult(List.of());
         };
         AssistantConversationService service = new AssistantConversationService(jdbc, gateway);
         try {
@@ -58,11 +59,12 @@ class AssistantConversationServiceTests {
         JdbcTemplate jdbc = preparedJdbc();
         CountDownLatch attached = new CountDownLatch(1);
         CountDownLatch released = new CountDownLatch(1);
-        AssistantModelGateway gateway = (messages, traceId, consumer, cancellation) -> {
+        AssistantModelGateway gateway = (messages, tools, traceId, consumer, cancellation) -> {
             cancellation.attach(() -> { released.countDown(); });
             attached.countDown();
             try { released.await(2, TimeUnit.SECONDS); }
             catch (InterruptedException exception) { Thread.currentThread().interrupt(); }
+            return new AssistantModelGateway.StreamResult(List.of());
         };
         AssistantConversationService service = new AssistantConversationService(jdbc, gateway);
         try {
