@@ -79,4 +79,34 @@ describe('investment assistant session panel', () => {
     wrapper.unmount()
     expect(signal.aborted).toBe(true)
   })
+  it('uploads private knowledge documents as multipart form data', async () => {
+    request.mockImplementation(async ({ method, url }) => {
+      if (method === 'post' && url === '/assistant/knowledge/documents') {
+        return { data: { code: 0, data: { id: 'd1', name: 'research.md' } } }
+      }
+      if (url === '/assistant/knowledge/documents') return { data: { code: 0, data: [] } }
+      return { data: { code: 0, data: url.endsWith('/messages')
+        ? [{ id: 'm', role: 'assistant', content: '欢迎', status: 'COMPLETED' }]
+        : [{ id: 'c', title: '历史会话' }] } }
+    })
+    const wrapper = mount(InvestmentAssistant)
+    await flushPromises()
+    await wrapper.get('[aria-label="私有知识库"]').trigger('click')
+    await flushPromises()
+    const input = wrapper.get('[aria-label="选择知识库文档"]')
+    Object.defineProperty(input.element, 'files', {
+      configurable: true,
+      value: [new File(['knowledge'], 'research.md', { type: 'text/markdown' })]
+    })
+    await input.trigger('change')
+    await flushPromises()
+
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'post',
+      url: '/assistant/knowledge/documents',
+      data: expect.any(FormData),
+      headers: { 'Content-Type': 'multipart/form-data' }
+    }))
+    wrapper.unmount()
+  })
 })

@@ -112,7 +112,7 @@ class AssistantConversationServiceTests {
             return new AssistantModelGateway.StreamResult(List.of());
         };
         AssistantConversationService service = new AssistantConversationService(
-                jdbc, gateway, null, attribution, null);
+                jdbc, gateway, null, attribution, null, null);
         try {
             service.ask(7, "id", "详细分析业绩归因", "trace");
             assertTrue(generated.await(2, TimeUnit.SECONDS));
@@ -121,6 +121,38 @@ class AssistantConversationServiceTests {
                     eq("attribution-snapshot"), eq("id"), anyString());
             verify(jdbc, timeout(2000)).update(eq("UPDATE ai_message SET content=? WHERE id=? AND conversation_id=?"),
                     eq("归因分析完成。"), anyString(), eq("id"));
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test void executesPrivateKnowledgeSearchAndAttachesEvidenceSnapshot() throws Exception {
+        JdbcTemplate jdbc = preparedJdbc();
+        AssistantKnowledgeToolService knowledge = mock(AssistantKnowledgeToolService.class);
+        when(knowledge.retrieve(eq(7L), eq("id"), contains("最大回撤"), anyString()))
+                .thenReturn(new AssistantKnowledgeToolService.KnowledgeContext(
+                        "knowledge-snapshot", "{\"available\":true,\"evidence\":[]}"));
+        CountDownLatch generated = new CountDownLatch(1);
+        AtomicInteger round = new AtomicInteger();
+        AssistantModelGateway gateway = (messages, tools, traceId, consumer, cancellation) -> {
+            if (round.getAndIncrement() == 0) {
+                assertTrue(tools.stream().anyMatch(tool -> "search_private_knowledge_base".equals(tool.name())));
+                return new AssistantModelGateway.StreamResult(List.of(
+                        new AssistantModelGateway.ToolCall("call-k1", "search_private_knowledge_base",
+                                "{\"query\":\"最大回撤\"}")));
+            }
+            consumer.accept(new AssistantModelGateway.ModelEvent("delta", "根据文档[K1]。", null, null));
+            generated.countDown();
+            return new AssistantModelGateway.StreamResult(List.of());
+        };
+        AssistantConversationService service = new AssistantConversationService(
+                jdbc, gateway, null, null, null, knowledge);
+        try {
+            service.ask(7, "id", "按我的文档解释最大回撤", "trace");
+            assertTrue(generated.await(2, TimeUnit.SECONDS));
+            verify(knowledge).retrieve(eq(7L), eq("id"), contains("最大回撤"), anyString());
+            verify(jdbc).update(eq("UPDATE ai_message SET knowledge_snapshot_id=? WHERE conversation_id=? AND request_id=?"),
+                    eq("knowledge-snapshot"), eq("id"), anyString());
         } finally {
             service.shutdown();
         }

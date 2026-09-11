@@ -95,6 +95,9 @@ app:
     initial-delay-ms: ${ORDER_STATUS_POLL_INITIAL_DELAY_MS:10000}
   market:
     quote-cache-ttl-ms: ${MARKET_QUOTE_CACHE_TTL_MS:1000}
+  assistant:
+    knowledge:
+      storage-root: ${ASSISTANT_KNOWLEDGE_STORAGE_ROOT:../runtime/knowledge}
 
 springdoc:
   swagger-ui:

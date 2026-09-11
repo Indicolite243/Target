@@ -8,6 +8,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.services.assistant_llm import AssistantModelError, AssistantModelSettings, QwenStreamingModel
+from app.services.assistant_embedding import (
+    AssistantEmbeddingError,
+    AssistantEmbeddingSettings,
+    QwenEmbeddingModel,
+)
 
 router = APIRouter()
 
@@ -47,6 +52,36 @@ class StreamRequest(BaseModel):
 
 def get_model() -> QwenStreamingModel:
     return QwenStreamingModel(AssistantModelSettings())
+
+
+def get_embedding_model() -> QwenEmbeddingModel:
+    return QwenEmbeddingModel(AssistantEmbeddingSettings())
+
+
+class EmbeddingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    inputs: list[str] = Field(min_length=1, max_length=10)
+
+    @model_validator(mode="after")
+    def validate_inputs(self):
+        if any(not value.strip() or len(value) > 8000 for value in self.inputs):
+            raise ValueError("embedding inputs must contain 1 to 8000 characters")
+        return self
+
+
+@router.post("/assistant/embeddings")
+async def assistant_embeddings(payload: EmbeddingRequest, model=Depends(get_embedding_model)):
+    if not model.settings.api_key.get_secret_value():
+        raise HTTPException(status_code=503, detail="百炼 Embedding 密钥尚未配置")
+    try:
+        selected_model, vectors = await model.embed(payload.inputs)
+        return {
+            "model": selected_model,
+            "dimensions": model.settings.dimensions,
+            "embeddings": vectors,
+        }
+    except AssistantEmbeddingError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def sse(event: str, data: dict) -> str:

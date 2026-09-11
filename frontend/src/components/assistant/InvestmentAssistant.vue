@@ -4,7 +4,8 @@
     <header>
       <strong>投研助手</strong>
       <div>
-        <button aria-label="历史会话" @click="historyOpen = !historyOpen">会话</button>
+        <button aria-label="私有知识库" @click="toggleKnowledge">知识库</button>
+        <button aria-label="历史会话" @click="toggleHistory">会话</button>
         <button aria-label="关闭投研助手" @click="opened = false">×</button>
       </div>
     </header>
@@ -15,6 +16,27 @@
         <button :disabled="busy" class="history-title" @click="selectConversation(item.id)">{{ item.title }}</button>
         <button :disabled="busy" aria-label="重命名会话" @click="renameConversation(item)">✎</button>
         <button :disabled="busy" aria-label="删除会话" @click="deleteConversation(item)">×</button>
+      </div>
+    </section>
+    <section v-if="knowledgeOpen" class="assistant-history assistant-knowledge">
+      <div class="knowledge-actions">
+        <button :disabled="uploading || working" @click="knowledgeInput?.click()">
+          {{ uploading ? '正在处理…' : '＋ 上传文档' }}
+        </button>
+        <input ref="knowledgeInput" hidden type="file" multiple accept=".pdf,.docx,.md,.txt"
+               aria-label="选择知识库文档"
+               @change="uploadKnowledge" />
+      </div>
+      <p>我的私有知识库</p>
+      <small>支持 PDF、DOCX、MD、TXT，单个不超过 6MB。文档和检索结果仅属于当前登录用户。</small>
+      <div v-if="knowledgeError" role="alert" class="assistant-error">{{ knowledgeError }}</div>
+      <p v-if="!knowledgeLoading && !documents.length" class="knowledge-empty">尚未上传文档</p>
+      <div v-for="document in documents" :key="document.id" class="knowledge-item">
+        <div>
+          <strong>{{ document.name }}</strong>
+          <small>{{ formatBytes(document.sizeBytes) }} · {{ document.chunkCount }} 个切片 · {{ document.status }}</small>
+        </div>
+        <button :disabled="uploading || working" aria-label="删除知识文档" @click="deleteKnowledge(document)">×</button>
       </div>
     </section>
     <div class="assistant-messages" aria-live="polite">
@@ -36,7 +58,7 @@
       <textarea v-model="draft" :disabled="Boolean(working)" aria-label="提问"
                 placeholder="向投研助手提问；Enter 发送，Shift+Enter 换行" rows="3"
                 @keydown.enter.exact.prevent="ask" />
-      <small>当前已接通千问、当前持仓、最近30天个股/行业收益贡献和最近回测；知识库能力正在接入，涉及缺失数据时会明确提示。</small>
+      <small>当前已接通千问、当前持仓、最近30天个股/行业收益贡献、最近回测和当前用户私有知识库；涉及缺失数据时会明确提示。</small>
       <button v-if="working" aria-label="停止生成" @click="cancelGeneration">停止</button>
       <button v-else aria-label="发送问题" :disabled="busy || !activeId || !draft.trim()" @click="ask">发送</button>
     </footer>
@@ -52,12 +74,18 @@ import { streamAssistant } from '@/services/assistantStream.js'
 
 const opened = ref(true)
 const historyOpen = ref(false)
+const knowledgeOpen = ref(false)
 const busy = ref(false)
 const error = ref('')
 const conversations = ref([])
 const messages = ref([])
 const activeId = ref(null)
 const draft = ref('')
+const documents = ref([])
+const knowledgeInput = ref(null)
+const knowledgeLoading = ref(false)
+const uploading = ref(false)
+const knowledgeError = ref('')
 const working = shallowRef(null)
 const phase = ref('准备生成')
 const elapsedSeconds = ref(0)
@@ -65,6 +93,7 @@ let disposed = false
 const controller = new AbortController()
 let elapsedTimer = null
 const endpoint = '/assistant/conversations'
+const knowledgeEndpoint = '/assistant/knowledge/documents'
 
 async function call(method, path = '', data) {
   const response = await httpClient.request({ method, url: endpoint + path, data, signal: controller.signal })
@@ -87,6 +116,58 @@ async function select(id) {
   historyOpen.value = false
 }
 function selectConversation(id) { return perform(() => select(id)) }
+function toggleHistory() { historyOpen.value = !historyOpen.value; knowledgeOpen.value = false }
+async function toggleKnowledge() {
+  knowledgeOpen.value = !knowledgeOpen.value
+  historyOpen.value = false
+  if (knowledgeOpen.value) await loadKnowledge()
+}
+async function loadKnowledge() {
+  knowledgeLoading.value = true
+  knowledgeError.value = ''
+  try {
+    const response = await httpClient.request({ method: 'get', url: knowledgeEndpoint, signal: controller.signal })
+    if (response.data.code !== 0) throw new Error(response.data.message || '知识库加载失败')
+    documents.value = response.data.data || []
+  } catch (exception) {
+    if (!disposed) knowledgeError.value = exception.message || '知识库加载失败'
+  } finally { knowledgeLoading.value = false }
+}
+async function uploadKnowledge(event) {
+  const files = Array.from(event.target.files || [])
+  event.target.value = ''
+  if (!files.length || uploading.value) return
+  uploading.value = true
+  knowledgeError.value = ''
+  try {
+    for (const file of files) {
+      const form = new FormData()
+      form.append('file', file)
+      const response = await httpClient.request({ method: 'post', url: knowledgeEndpoint,
+        data: form, headers: { 'Content-Type': 'multipart/form-data' }, signal: controller.signal })
+      if (response.data.code !== 0) throw new Error(response.data.message || `${file.name} 上传失败`)
+    }
+    await loadKnowledge()
+  } catch (exception) {
+    if (!disposed) knowledgeError.value = exception.message || '知识库文档处理失败'
+  } finally { uploading.value = false }
+}
+async function deleteKnowledge(document) {
+  try { await ElMessageBox.confirm(`删除知识文档“${document.name}”？`, '删除文档', { modal: false, lockScroll: false }) }
+  catch { return }
+  knowledgeError.value = ''
+  try {
+    const response = await httpClient.request({ method: 'delete',
+      url: `${knowledgeEndpoint}/${document.id}`, signal: controller.signal })
+    if (response.data.code !== 0) throw new Error(response.data.message || '删除文档失败')
+    documents.value = documents.value.filter(value => value.id !== document.id)
+  } catch (exception) { knowledgeError.value = exception.message || '删除文档失败' }
+}
+function formatBytes(value) {
+  const bytes = Number(value || 0)
+  return bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024
+    ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
 function load() {
   return perform(async () => {
     conversations.value = await call('get')
@@ -209,7 +290,12 @@ async function cancelGeneration() {
     job.controller.abort()
   }
 }
-function onKey(event) { if (event.key === 'Escape') { if (historyOpen.value) historyOpen.value = false; else opened.value = false } }
+function onKey(event) {
+  if (event.key !== 'Escape') return
+  if (knowledgeOpen.value) knowledgeOpen.value = false
+  else if (historyOpen.value) historyOpen.value = false
+  else opened.value = false
+}
 onMounted(() => { load(); window.addEventListener('keydown', onKey) })
 onBeforeUnmount(() => {
   disposed = true
@@ -264,4 +350,11 @@ small { flex: 1; color: #66788e; font-size: 12px; }
 .assistant-history p { margin: 14px 0; }
 .history-item { display: flex; align-items: center; }
 .history-title { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-actions { display: flex; justify-content: flex-start; }
+.assistant-knowledge > small { display: block; margin-bottom: 14px; line-height: 1.5; }
+.knowledge-item { display: flex; align-items: flex-start; gap: 8px; padding: 10px 4px; border-bottom: 1px solid #e6edf5; }
+.knowledge-item > div { flex: 1; min-width: 0; }
+.knowledge-item strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-item small { display: block; margin-top: 4px; }
+.knowledge-empty { color: #66788e; }
 </style>
