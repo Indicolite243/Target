@@ -1,11 +1,13 @@
 <template>
   <button v-if="!opened" class="assistant-launch" @click="opened = true">投研助手</button>
-  <aside v-show="opened" class="assistant-panel" aria-label="投研助手">
-    <header>
+  <aside ref="panel" v-show="opened" class="assistant-panel" aria-label="投研助手" :style="panelStyle">
+    <header class="assistant-titlebar" tabindex="0" aria-label="拖动以移动投研助手窗口"
+            @pointerdown="startDrag" @keydown="moveWithKeyboard">
       <strong>投研助手</strong>
       <div>
         <button aria-label="私有知识库" @click="toggleKnowledge">知识库</button>
         <button aria-label="历史会话" @click="toggleHistory">会话</button>
+        <button aria-label="重置窗口位置和大小" title="重置窗口位置和大小" @click="resetLayout">复位</button>
         <button aria-label="关闭投研助手" @click="opened = false">×</button>
       </div>
     </header>
@@ -62,11 +64,14 @@
       <button v-if="working" aria-label="停止生成" @click="cancelGeneration">停止</button>
       <button v-else aria-label="发送问题" :disabled="busy || !activeId || !draft.trim()" @click="ask">发送</button>
     </footer>
+    <div class="assistant-resize-handle" role="separator" tabindex="0" aria-orientation="horizontal"
+         aria-label="拖动以调整投研助手窗口大小" title="拖动调整窗口大小"
+         @pointerdown.stop="startResize" @keydown="resizeWithKeyboard" />
   </aside>
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount, reactive, ref, shallowRef } from 'vue'
+import { computed, onMounted, onBeforeUnmount, reactive, ref, shallowRef } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { httpClient } from '@/utils/httpClient'
 import { renderSafeMarkdown } from '@/utils/safeMarkdown.js'
@@ -89,11 +94,108 @@ const knowledgeError = ref('')
 const working = shallowRef(null)
 const phase = ref('准备生成')
 const elapsedSeconds = ref(0)
+const panel = ref(null)
+const layout = reactive({ left: 0, top: 80, width: 440, height: 640 })
 let disposed = false
 const controller = new AbortController()
 let elapsedTimer = null
+let layoutOperation = null
 const endpoint = '/assistant/conversations'
 const knowledgeEndpoint = '/assistant/knowledge/documents'
+const layoutStorageKey = 'investment_assistant_layout_v1'
+const panelStyle = computed(() => ({
+  left: `${layout.left}px`, top: `${layout.top}px`,
+  width: `${layout.width}px`, height: `${layout.height}px`
+}))
+
+function viewport() {
+  return {
+    width: Math.max(320, window.innerWidth || document.documentElement.clientWidth || 0),
+    height: Math.max(480, window.innerHeight || document.documentElement.clientHeight || 0)
+  }
+}
+function boundedLayout(candidate) {
+  const screen = viewport()
+  const edge = 8
+  const minWidth = Math.min(360, screen.width - edge * 2)
+  const minHeight = Math.min(420, screen.height - edge * 2)
+  const width = Math.min(Math.max(Number(candidate.width) || minWidth, minWidth), screen.width - edge * 2)
+  const height = Math.min(Math.max(Number(candidate.height) || minHeight, minHeight), screen.height - edge * 2)
+  return {
+    width: Math.round(width), height: Math.round(height),
+    left: Math.round(Math.min(Math.max(Number(candidate.left) || edge, edge), screen.width - width - edge)),
+    top: Math.round(Math.min(Math.max(Number(candidate.top) || edge, edge), screen.height - height - edge))
+  }
+}
+function defaultLayout() {
+  const screen = viewport()
+  const width = Math.min(560, Math.max(380, Math.round(screen.width * 0.25)))
+  const height = Math.max(420, screen.height - 96)
+  return boundedLayout({ left: screen.width - width - 16, top: 80, width, height })
+}
+function applyLayout(candidate) { Object.assign(layout, boundedLayout(candidate)) }
+function saveLayout() {
+  try { localStorage.setItem(layoutStorageKey, JSON.stringify({ ...layout })) } catch { /* storage may be disabled */ }
+}
+function restoreLayout() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(layoutStorageKey) || 'null')
+    applyLayout(saved && typeof saved === 'object' ? saved : defaultLayout())
+  } catch { applyLayout(defaultLayout()) }
+}
+function resetLayout() { applyLayout(defaultLayout()); saveLayout() }
+function startLayoutOperation(event, mode) {
+  if (event.button !== 0 || (mode === 'drag' && event.target.closest('button, input, textarea'))) return
+  event.preventDefault()
+  layoutOperation = { mode, x: event.clientX, y: event.clientY, initial: { ...layout } }
+  window.addEventListener('pointermove', onLayoutPointerMove)
+  window.addEventListener('pointerup', finishLayoutOperation)
+  window.addEventListener('pointercancel', finishLayoutOperation)
+}
+function startDrag(event) { startLayoutOperation(event, 'drag') }
+function startResize(event) { startLayoutOperation(event, 'resize') }
+function onLayoutPointerMove(event) {
+  if (!layoutOperation) return
+  event.preventDefault()
+  const dx = event.clientX - layoutOperation.x
+  const dy = event.clientY - layoutOperation.y
+  const initial = layoutOperation.initial
+  if (layoutOperation.mode === 'drag') {
+    applyLayout({ ...initial, left: initial.left + dx, top: initial.top + dy })
+    return
+  }
+  const screen = viewport()
+  applyLayout({ ...initial,
+    width: Math.min(initial.width + dx, screen.width - initial.left - 8),
+    height: Math.min(initial.height + dy, screen.height - initial.top - 8) })
+}
+function finishLayoutOperation() {
+  if (!layoutOperation) return
+  layoutOperation = null
+  window.removeEventListener('pointermove', onLayoutPointerMove)
+  window.removeEventListener('pointerup', finishLayoutOperation)
+  window.removeEventListener('pointercancel', finishLayoutOperation)
+  saveLayout()
+}
+function moveWithKeyboard(event) {
+  if (event.target !== event.currentTarget || !event.key.startsWith('Arrow')) return
+  event.preventDefault()
+  const step = event.shiftKey ? 40 : 10
+  applyLayout({ ...layout,
+    left: layout.left + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0),
+    top: layout.top + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0) })
+  saveLayout()
+}
+function resizeWithKeyboard(event) {
+  if (!event.key.startsWith('Arrow')) return
+  event.preventDefault()
+  const step = event.shiftKey ? 40 : 10
+  applyLayout({ ...layout,
+    width: layout.width + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0),
+    height: layout.height + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0) })
+  saveLayout()
+}
+function keepLayoutInViewport() { applyLayout(layout); saveLayout() }
 
 async function call(method, path = '', data) {
   const response = await httpClient.request({ method, url: endpoint + path, data, signal: controller.signal })
@@ -296,19 +398,29 @@ function onKey(event) {
   else if (historyOpen.value) historyOpen.value = false
   else opened.value = false
 }
-onMounted(() => { load(); window.addEventListener('keydown', onKey) })
+onMounted(() => {
+  restoreLayout()
+  load()
+  window.addEventListener('keydown', onKey)
+  window.addEventListener('resize', keepLayoutInViewport)
+})
 onBeforeUnmount(() => {
   disposed = true
+  finishLayoutOperation()
   controller.abort()
   working.value?.controller.abort()
   if (elapsedTimer) window.clearInterval(elapsedTimer)
   window.removeEventListener('keydown', onKey)
+  window.removeEventListener('resize', keepLayoutInViewport)
 })
 </script>
 
 <style scoped>
-.assistant-panel { position: fixed; right: 16px; top: 80px; bottom: 16px; width: clamp(380px, 25vw, 560px); max-width: calc(100vw - 32px); z-index: 2000; display: flex; flex-direction: column; color: #20344e; background: #f8fbff; border: 1px solid #d6e4f3; border-radius: 16px; box-shadow: 0 12px 45px #0005; overflow: hidden; }
-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; background: white; border-bottom: 1px solid #e1e8f0; }
+.assistant-panel { position: fixed; min-width: 360px; min-height: 420px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); z-index: 2000; display: flex; flex-direction: column; color: #20344e; background: #f8fbff; border: 1px solid #d6e4f3; border-radius: 16px; box-shadow: 0 12px 45px #0005; overflow: hidden; }
+header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 12px 18px; background: white; border-bottom: 1px solid #e1e8f0; }
+.assistant-titlebar { cursor: move; user-select: none; touch-action: none; outline: none; }
+.assistant-titlebar:focus-visible { box-shadow: inset 0 0 0 2px #6ba9ef; }
+.assistant-titlebar button { cursor: pointer; }
 button { cursor: pointer; background: #edf4ff; color: #245b9e; border: 0; border-radius: 6px; padding: 8px 12px; margin: 2px; }
 button:disabled { cursor: not-allowed; opacity: .55; }
 .assistant-launch { position: fixed; right: 20px; bottom: 24px; z-index: 2000; box-shadow: 0 5px 20px #0005; }
@@ -357,4 +469,12 @@ small { flex: 1; color: #66788e; font-size: 12px; }
 .knowledge-item strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .knowledge-item small { display: block; margin-top: 4px; }
 .knowledge-empty { color: #66788e; }
+.assistant-resize-handle { position: absolute; right: 0; bottom: 0; z-index: 4; width: 22px; height: 22px; cursor: nwse-resize; touch-action: none; outline: none; }
+.assistant-resize-handle::after { content: ''; position: absolute; right: 5px; bottom: 5px; width: 10px; height: 10px; border-right: 2px solid #72a3d8; border-bottom: 2px solid #72a3d8; }
+.assistant-resize-handle:focus-visible { background: #dcecff; border-radius: 6px 0 14px; }
+@media (max-width: 520px), (max-height: 560px) {
+  .assistant-panel { min-width: 0; min-height: 0; border-radius: 12px; }
+  header { padding-left: 12px; }
+  button { padding: 7px 9px; }
+}
 </style>

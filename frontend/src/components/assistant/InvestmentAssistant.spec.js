@@ -10,6 +10,9 @@ vi.mock('element-plus', () => ({ ElMessageBox: { prompt: vi.fn(), confirm: vi.fn
 
 describe('investment assistant session panel', () => {
   beforeEach(() => {
+    localStorage.clear()
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
     request.mockReset()
     streamAssistant.mockReset()
     request.mockImplementation(async ({ url }) => ({ data: { code: 0, data:
@@ -107,6 +110,41 @@ describe('investment assistant session panel', () => {
       data: expect.any(FormData),
       headers: { 'Content-Type': 'multipart/form-data' }
     }))
+    wrapper.unmount()
+  })
+  it('moves, resizes and persists the floating window layout', async () => {
+    const wrapper = mount(InvestmentAssistant)
+    await flushPromises()
+    const panel = wrapper.get('.assistant-panel')
+    const initialLeft = Number.parseInt(panel.element.style.left)
+    const initialTop = Number.parseInt(panel.element.style.top)
+    const initialWidth = Number.parseInt(panel.element.style.width)
+    const initialHeight = Number.parseInt(panel.element.style.height)
+
+    await wrapper.get('.assistant-titlebar').trigger('pointerdown', {
+      button: 0, clientX: 100, clientY: 100
+    })
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: -100, clientY: 70 }))
+    window.dispatchEvent(new MouseEvent('pointerup'))
+    await flushPromises()
+    expect(Number.parseInt(panel.element.style.left)).toBe(initialLeft - 200)
+    expect(Number.parseInt(panel.element.style.top)).toBe(initialTop - 30)
+    const movedLeft = Number.parseInt(panel.element.style.left)
+    const movedTop = Number.parseInt(panel.element.style.top)
+
+    await wrapper.get('.assistant-resize-handle').trigger('pointerdown', {
+      button: 0, clientX: 500, clientY: 500
+    })
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 580, clientY: 450 }))
+    window.dispatchEvent(new MouseEvent('pointerup'))
+    await flushPromises()
+    expect(Number.parseInt(panel.element.style.width)).toBe(initialWidth + 80)
+    expect(Number.parseInt(panel.element.style.height)).toBe(initialHeight - 50)
+    expect(Number.parseInt(panel.element.style.left)).toBe(movedLeft)
+    expect(JSON.parse(localStorage.getItem('investment_assistant_layout_v1'))).toMatchObject({
+      left: Number.parseInt(panel.element.style.left), top: movedTop,
+      width: initialWidth + 80, height: initialHeight - 50
+    })
     wrapper.unmount()
   })
 })
