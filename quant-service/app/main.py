@@ -11,6 +11,7 @@ from time import perf_counter
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 
 from app.config import Settings, get_settings
+from app.assistant_api import router as assistant_router
 from app.schemas.account import AccountSyncRequest
 from app.schemas.analysis import PortfolioHistoryRequest
 from app.schemas.common import InternalResponse
@@ -58,6 +59,9 @@ def authorize(
 
     if x_internal_token != settings.internal_token:
         raise HTTPException(status_code=401, detail="invalid internal token")
+
+
+app.include_router(assistant_router, prefix="/internal/v1", dependencies=[Depends(authorize)])
 
 
 def response(data: dict, trace_id: str, started: float) -> InternalResponse:
