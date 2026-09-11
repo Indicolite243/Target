@@ -21,7 +21,7 @@ import MockDataIndicator from '@/components/layout/MockDataIndicator.vue';
 import InvestmentAssistant from '@/components/assistant/InvestmentAssistant.vue'
 
 // 分阶段开发：显式启用后验证会话管理，模型链路验收后再默认开启。
-const assistantEnabled = import.meta.env.VITE_ASSISTANT_ENABLED === 'true'
+const assistantEnabled = import.meta.env.VITE_ASSISTANT_ENABLED !== 'false'
 
 const route = useRoute()
 

@@ -52,3 +52,10 @@ def test_length_limit_is_not_success():
     instance = model(lambda request: httpx.Response(200, text='data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'))
     with pytest.raises(AssistantModelError, match="未完整结束"):
         collect(instance)
+
+
+def test_can_reference_existing_local_credentials_without_copying_key(tmp_path):
+    credentials = tmp_path / "learning.env"
+    credentials.write_text("OTHER=value\n" + "DASHSCOPE_" + "API_KEY=referenced-test-key\n", encoding="utf-8")
+    settings = AssistantModelSettings(_env_file=None, ASSISTANT_LLM_CREDENTIALS_FILE=credentials)
+    assert settings.api_key.get_secret_value() == "referenced-test-key"

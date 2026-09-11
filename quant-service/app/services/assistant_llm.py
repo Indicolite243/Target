@@ -4,21 +4,39 @@ from pathlib import Path
 from typing import AsyncIterator
 
 import httpx
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class AssistantModelSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=Path(__file__).resolve().parents[3] / ".env",
+        env_file=(Path(__file__).resolve().parents[3] / ".env",
+                  Path(__file__).resolve().parents[3] / ".env.assistant.local"),
         extra="ignore",
     )
     api_key: SecretStr = Field(default=SecretStr(""), validation_alias="DASHSCOPE_API_KEY")
+    credentials_file: Path | None = Field(default=None, validation_alias="ASSISTANT_LLM_CREDENTIALS_FILE")
     base_url: str = Field(default="https://dashscope.aliyuncs.com/compatible-mode/v1", validation_alias="ASSISTANT_LLM_BASE_URL")
     model: str = Field(default="qwen3.7-plus", validation_alias="ASSISTANT_LLM_MODEL")
     temperature: float = Field(default=0.2, ge=0, le=2, validation_alias="ASSISTANT_LLM_TEMPERATURE")
     timeout_seconds: float = Field(default=90, gt=0, validation_alias="ASSISTANT_LLM_TIMEOUT_SECONDS")
     max_tokens: int = Field(default=4096, gt=0, validation_alias="ASSISTANT_LLM_MAX_TOKENS")
+
+    @model_validator(mode="after")
+    def load_referenced_key(self):
+        """本机可引用既有 env；只读取目标键，不复制或输出其它配置。"""
+        if self.api_key.get_secret_value() or self.credentials_file is None:
+            return self
+        try:
+            if self.credentials_file.stat().st_size > 128 * 1024:
+                return self
+            for line in self.credentials_file.read_text(encoding="utf-8-sig").splitlines():
+                if line.startswith("DASHSCOPE_API_KEY="):
+                    self.api_key = SecretStr(line.partition("=")[2].strip().strip("\"'"))
+                    break
+        except (OSError, UnicodeError):
+            pass
+        return self
 
 
 class AssistantModelError(RuntimeError):

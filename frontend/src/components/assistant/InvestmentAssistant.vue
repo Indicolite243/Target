@@ -19,24 +19,32 @@
     </section>
     <div class="assistant-messages" aria-live="polite">
       <p v-if="busy">正在加载会话…</p>
+      <p v-if="working" class="assistant-progress">{{ phase }} · {{ elapsedSeconds }} 秒</p>
       <div v-if="error" role="alert" class="assistant-error">{{ error }} <button @click="load">重试</button></div>
       <article v-for="message in messages" :key="message.id" :class="['assistant-message', message.role]">
         {{ message.content }}
+        <small v-if="message.role === 'assistant' && message.status && message.status !== 'COMPLETED'" class="message-status">
+          {{ statusLabel(message.status) }}
+        </small>
       </article>
       <button v-if="!busy && !error && !activeId" @click="createConversation">开始新对话</button>
     </div>
     <footer>
-      <textarea v-model="draft" aria-label="提问" placeholder="会话管理已接通，模型问答正在接入" rows="3" />
-      <small>开发阶段：已支持会话保存；分析与流式问答尚未启用。</small>
-      <button disabled>发送</button>
+      <textarea v-model="draft" :disabled="Boolean(working)" aria-label="提问"
+                placeholder="向投研助手提问；Enter 发送，Shift+Enter 换行" rows="3"
+                @keydown.enter.exact.prevent="ask" />
+      <small>当前已接通千问；账户、回测和知识库分析正在接入，涉及这些数据时会明确提示。</small>
+      <button v-if="working" aria-label="停止生成" @click="cancelGeneration">停止</button>
+      <button v-else aria-label="发送问题" :disabled="busy || !activeId || !draft.trim()" @click="ask">发送</button>
     </footer>
   </aside>
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { onMounted, onBeforeUnmount, reactive, ref, shallowRef } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { httpClient } from '@/utils/httpClient'
+import { streamAssistant } from '@/services/assistantStream.js'
 
 const opened = ref(true)
 const historyOpen = ref(false)
@@ -46,8 +54,12 @@ const conversations = ref([])
 const messages = ref([])
 const activeId = ref(null)
 const draft = ref('')
+const working = shallowRef(null)
+const phase = ref('准备生成')
+const elapsedSeconds = ref(0)
 let disposed = false
 const controller = new AbortController()
+let elapsedTimer = null
 const endpoint = '/assistant/conversations'
 
 async function call(method, path = '', data) {
@@ -117,9 +129,91 @@ async function deleteConversation(item) {
     }
   })
 }
+function statusLabel(status) {
+  return ({ GENERATING: '正在生成', PENDING: '等待回答', CANCELLED: '已停止，内容不完整',
+    FAILED: '生成失败，内容可能不完整' })[status] || status
+}
+function updateStreamEvent(job, event, data) {
+  if (event === 'accepted') {
+    job.user.id = data.userMessageId
+    job.assistant.id = data.assistantMessageId
+  } else if (event === 'status') {
+    phase.value = data.message || '正在生成回答'
+  } else if (event === 'delta') {
+    job.assistant.content += data.text || ''
+  } else if (event === 'done') {
+    job.user.status = 'COMPLETED'
+    job.assistant.status = 'COMPLETED'
+    phase.value = '回答完成'
+  } else if (event === 'error') {
+    job.user.status = 'FAILED'
+    job.assistant.status = 'FAILED'
+    phase.value = data.message || '生成失败'
+  } else if (event === 'cancelled') {
+    job.user.status = 'CANCELLED'
+    job.assistant.status = 'CANCELLED'
+    phase.value = '已停止生成'
+  }
+}
+async function refreshActiveMessages(conversationId) {
+  if (!disposed && activeId.value === conversationId) messages.value = await call('get', `/${conversationId}/messages`)
+}
+async function ask() {
+  const question = draft.value.trim()
+  if (!question || !activeId.value || busy.value || working.value) return
+  error.value = ''
+  const conversationId = activeId.value
+  const streamController = new AbortController()
+  const user = reactive({ id: `local-user-${Date.now()}`, role: 'user', content: question, status: 'PENDING' })
+  const assistant = reactive({ id: `local-assistant-${Date.now()}`, role: 'assistant', content: '', status: 'GENERATING' })
+  const job = { conversationId, controller: streamController, user, assistant }
+  working.value = job
+  messages.value.push(user, assistant)
+  draft.value = ''
+  phase.value = '正在连接千问'
+  elapsedSeconds.value = 0
+  elapsedTimer = window.setInterval(() => { elapsedSeconds.value += 1 }, 1000)
+  try {
+    await streamAssistant({ conversationId, question, signal: streamController.signal,
+      onEvent: (event, data) => updateStreamEvent(job, event, data) })
+  } catch (exception) {
+    if (exception.name !== 'AbortError') {
+      user.status = 'FAILED'
+      assistant.status = 'FAILED'
+      error.value = exception.message || '回答生成失败'
+    }
+  } finally {
+    if (elapsedTimer) window.clearInterval(elapsedTimer)
+    elapsedTimer = null
+    if (working.value === job) working.value = null
+    try { await refreshActiveMessages(conversationId) } catch (exception) {
+      if (!disposed) error.value = exception.message || '消息状态刷新失败'
+    }
+  }
+}
+async function cancelGeneration() {
+  const job = working.value
+  if (!job) return
+  phase.value = '正在停止'
+  try {
+    await call('post', `/${job.conversationId}/cancel`)
+    job.user.status = 'CANCELLED'
+    job.assistant.status = 'CANCELLED'
+  } catch (exception) {
+    error.value = exception.message || '停止失败'
+  } finally {
+    job.controller.abort()
+  }
+}
 function onKey(event) { if (event.key === 'Escape') { if (historyOpen.value) historyOpen.value = false; else opened.value = false } }
 onMounted(() => { load(); window.addEventListener('keydown', onKey) })
-onBeforeUnmount(() => { disposed = true; controller.abort(); window.removeEventListener('keydown', onKey) })
+onBeforeUnmount(() => {
+  disposed = true
+  controller.abort()
+  working.value?.controller.abort()
+  if (elapsedTimer) window.clearInterval(elapsedTimer)
+  window.removeEventListener('keydown', onKey)
+})
 </script>
 
 <style scoped>
@@ -132,6 +226,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .assistant-message { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; background: #eaf0f7; padding: 16px; border-radius: 12px; margin-bottom: 14px; }
 .assistant-message.user { background: #dcecff; }
 .assistant-error { color: #b33232; }
+.assistant-progress { position: sticky; top: 0; z-index: 1; margin: 0 0 12px; padding: 8px 10px; color: #245b9e; background: #edf5ff; border-radius: 8px; }
+.message-status { display: block; margin-top: 8px; color: #9b5b13; }
 footer { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px; border-top: 1px solid #e1e8f0; background: white; }
 textarea { width: 100%; resize: vertical; max-height: 160px; padding: 10px; border: 1px solid #cbd9e8; border-radius: 8px; font: inherit; color: #20344e; }
 small { flex: 1; color: #66788e; font-size: 12px; }

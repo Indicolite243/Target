@@ -20,5 +20,6 @@ quant-service/.env
 
 # Runtime and secrets
 .env
+/.env.assistant.local
 runtime/
 *.log

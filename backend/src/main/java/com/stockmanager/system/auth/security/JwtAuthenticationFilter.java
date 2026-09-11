@@ -41,6 +41,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         this.tokenBlacklist = tokenBlacklist;
     }
 
+    /** SSE 会触发一次 ASYNC dispatcher；该阶段也必须从同一 Authorization 头恢复用户身份。 */
+    @Override
+    protected boolean shouldNotFilterAsyncDispatch() {
+        return false;
+    }
+
     // 读取 Authorization 请求头，并为当前请求安装认证信息。
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,

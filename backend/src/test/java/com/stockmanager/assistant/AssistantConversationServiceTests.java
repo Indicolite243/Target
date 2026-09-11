@@ -2,7 +2,11 @@ package com.stockmanager.assistant;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import com.stockmanager.common.exception.BusinessException;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -26,5 +30,70 @@ class AssistantConversationServiceTests {
         assertThrows(BusinessException.class, () -> new AssistantConversationService(jdbc).delete(7, "id"));
         verify(jdbc).update("DELETE FROM ai_conversation WHERE id=? AND user_id=?", "id", 7L);
         verifyNoMoreInteractions(jdbc);
+    }
+
+    @Test void completedPairIsPersistedAndPartialTextIsNotLost() throws Exception {
+        JdbcTemplate jdbc = preparedJdbc();
+        CountDownLatch generated = new CountDownLatch(1);
+        AssistantModelGateway gateway = (messages, traceId, consumer, cancellation) -> {
+            assertEquals("system", messages.getFirst().role());
+            assertEquals("当前组合怎么样", messages.getLast().content());
+            consumer.accept(new AssistantModelGateway.ModelEvent("delta", "尚未接入账户数据。", null, null));
+            generated.countDown();
+        };
+        AssistantConversationService service = new AssistantConversationService(jdbc, gateway);
+        try {
+            service.ask(7, "id", "当前组合怎么样", "trace");
+            assertTrue(generated.await(2, TimeUnit.SECONDS));
+            verify(jdbc, timeout(2000)).update(eq("UPDATE ai_message SET status=? WHERE id IN (?,?) AND conversation_id=?"),
+                    eq("COMPLETED"), anyString(), anyString(), eq("id"));
+            verify(jdbc, atLeastOnce()).update(eq("UPDATE ai_message SET content=? WHERE id=? AND conversation_id=?"),
+                    eq("尚未接入账户数据。"), anyString(), eq("id"));
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test void cancellationClosesUpstreamAndPersistsIncompleteState() throws Exception {
+        JdbcTemplate jdbc = preparedJdbc();
+        CountDownLatch attached = new CountDownLatch(1);
+        CountDownLatch released = new CountDownLatch(1);
+        AssistantModelGateway gateway = (messages, traceId, consumer, cancellation) -> {
+            cancellation.attach(() -> { released.countDown(); });
+            attached.countDown();
+            try { released.await(2, TimeUnit.SECONDS); }
+            catch (InterruptedException exception) { Thread.currentThread().interrupt(); }
+        };
+        AssistantConversationService service = new AssistantConversationService(jdbc, gateway);
+        try {
+            service.ask(7, "id", "请分析", "trace");
+            assertTrue(attached.await(2, TimeUnit.SECONDS));
+            assertTrue(service.cancel(7, "id"));
+            assertTrue(released.await(2, TimeUnit.SECONDS));
+            verify(jdbc).update(eq("UPDATE ai_message SET status=? WHERE id IN (?,?) AND conversation_id=?"),
+                    eq("CANCELLED"), anyString(), anyString(), eq("id"));
+            assertFalse(service.cancel(7, "id"));
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test void rejectsEmptyQuestionBeforeCreatingMessages() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        AssistantConversationService service = new AssistantConversationService(jdbc, mock(AssistantModelGateway.class));
+        try {
+            assertThrows(BusinessException.class, () -> service.ask(7, "id", " ", "trace"));
+            verifyNoInteractions(jdbc);
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private JdbcTemplate preparedJdbc() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.queryForObject(anyString(), eq(Integer.class), eq("id"), eq(7L))).thenReturn(1);
+        when(jdbc.query(contains("SELECT m.role"), any(RowMapper.class), eq("id"))).thenReturn(List.of());
+        return jdbc;
     }
 }
