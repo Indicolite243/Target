@@ -5,6 +5,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import com.stockmanager.common.exception.BusinessException;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
@@ -86,6 +87,40 @@ class AssistantConversationServiceTests {
         try {
             assertThrows(BusinessException.class, () -> service.ask(7, "id", " ", "trace"));
             verifyNoInteractions(jdbc);
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test void executesAttributionToolAndStreamsGroundedAnswer() throws Exception {
+        JdbcTemplate jdbc = preparedJdbc();
+        AssistantAttributionToolService attribution = mock(AssistantAttributionToolService.class);
+        when(attribution.getOrCreate(eq(7L), eq("id"), anyString()))
+                .thenReturn(new AssistantAttributionToolService.FrozenAttribution(
+                        "attribution-snapshot", "{\"available\":true}"));
+        CountDownLatch generated = new CountDownLatch(1);
+        AtomicInteger round = new AtomicInteger();
+        AssistantModelGateway gateway = (messages, tools, traceId, consumer, cancellation) -> {
+            if (round.getAndIncrement() == 0) {
+                assertTrue(tools.stream().anyMatch(tool -> "get_performance_attribution".equals(tool.name())));
+                return new AssistantModelGateway.StreamResult(List.of(
+                        new AssistantModelGateway.ToolCall("call-1", "get_performance_attribution", "{}")));
+            }
+            assertEquals("tool", messages.getLast().role());
+            consumer.accept(new AssistantModelGateway.ModelEvent("delta", "归因分析完成。", null, null));
+            generated.countDown();
+            return new AssistantModelGateway.StreamResult(List.of());
+        };
+        AssistantConversationService service = new AssistantConversationService(
+                jdbc, gateway, null, attribution, null);
+        try {
+            service.ask(7, "id", "详细分析业绩归因", "trace");
+            assertTrue(generated.await(2, TimeUnit.SECONDS));
+            verify(attribution).getOrCreate(eq(7L), eq("id"), anyString());
+            verify(jdbc).update(eq("UPDATE ai_message SET attribution_snapshot_id=? WHERE conversation_id=? AND request_id=?"),
+                    eq("attribution-snapshot"), eq("id"), anyString());
+            verify(jdbc, timeout(2000)).update(eq("UPDATE ai_message SET content=? WHERE id=? AND conversation_id=?"),
+                    eq("归因分析完成。"), anyString(), eq("id"));
         } finally {
             service.shutdown();
         }

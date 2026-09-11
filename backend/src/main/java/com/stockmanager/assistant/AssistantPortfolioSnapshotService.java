@@ -79,14 +79,14 @@ public class AssistantPortfolioSnapshotService {
             payload.put("positions", positions.stream().map(this::positionPayload).toList());
             payload.put("limitations", List.of(
                     "这是 MySQL 中最近一次已确认快照，不代表实时行情；数据截至时间取 sourceDataAsOf，不是 snapshotFrozenAt",
-                    "当前工具尚未包含历史成交、业绩归因、回测结果或行业穿透",
+                    "当前持仓快照本身不包含历史成交、回测结果或行业穿透；相关问题需要调用对应工具",
                     "账户号码、用户身份和系统内部主键未发送给模型"));
         }
 
         String snapshotJson = json(payload);
         String snapshotId = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO ai_data_snapshot(id,conversation_id,account_id,snapshot_json,captured_at,source_version) VALUES(?,?,?,?,?,?)",
-                snapshotId, conversationId, accountId, snapshotJson, Timestamp.valueOf(capturedAt), sourceVersion);
+        jdbc.update("INSERT INTO ai_data_snapshot(id,conversation_id,account_id,snapshot_type,snapshot_json,captured_at,source_version) VALUES(?,?,?,?,?,?,?)",
+                snapshotId, conversationId, accountId, "PORTFOLIO", snapshotJson, Timestamp.valueOf(capturedAt), sourceVersion);
         jdbc.update("UPDATE ai_conversation SET account_id=?,active_snapshot_id=?,updated_at=? WHERE id=? AND user_id=?",
                 accountId, snapshotId, Timestamp.valueOf(capturedAt), conversationId, userId);
         return new FrozenSnapshot(snapshotId, compactForModel(snapshotJson));

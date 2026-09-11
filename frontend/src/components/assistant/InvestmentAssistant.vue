@@ -36,7 +36,7 @@
       <textarea v-model="draft" :disabled="Boolean(working)" aria-label="提问"
                 placeholder="向投研助手提问；Enter 发送，Shift+Enter 换行" rows="3"
                 @keydown.enter.exact.prevent="ask" />
-      <small>当前已接通千问、当前持仓和最近回测；历史归因与知识库能力正在接入，涉及缺失数据时会明确提示。</small>
+      <small>当前已接通千问、当前持仓、最近30天个股/行业收益贡献和最近回测；知识库能力正在接入，涉及缺失数据时会明确提示。</small>
       <button v-if="working" aria-label="停止生成" @click="cancelGeneration">停止</button>
       <button v-else aria-label="发送问题" :disabled="busy || !activeId || !draft.trim()" @click="ask">发送</button>
     </footer>

@@ -192,6 +192,11 @@ public class AnalysisServiceImpl implements AnalysisService {
                 ? currentPositionAttribution(account)
                 : portfolioHistory(account, start, end, "DAILY");
         List<Map<String, Object>> rawPositions = mapList(history.get("positionHistory"));
+        Map<String, Position> currentPositions = new LinkedHashMap<>();
+        for (Position position : positions(accountId)) {
+            String code = blank(position.getSecurityCode(), "");
+            if (!code.isBlank()) currentPositions.put(code, position);
+        }
         BigDecimal totalMarketValue = rawPositions.stream()
                 .map(item -> decimal(item.get("marketValue")))
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -207,7 +212,15 @@ public class AnalysisServiceImpl implements AnalysisService {
             BigDecimal pnl = decimal(raw.get("periodPnl"));
             BigDecimal startPrice = decimal(raw.get("startPrice"));
             BigDecimal endPrice = decimal(raw.get("endPrice"));
-            String industry = text(raw.get("industry"), "其他");
+            String symbol = text(raw.get("symbol"), "");
+            String securityName = text(raw.get("securityName"), symbol);
+            String industry = text(raw.get("industry"), "");
+            if (industry.isBlank() || "其他".equals(industry)) {
+                Position current = currentPositions.get(symbol);
+                industry = current == null
+                        ? inferIndustry(securityName, symbol)
+                        : industry(current);
+            }
             BigDecimal contribution = ratio(pnl, totalMarketValue);
             BigDecimal returnRate = ratio(endPrice.subtract(startPrice), startPrice);
             if (contribution.signum() > 0) positive++;
@@ -215,8 +228,8 @@ public class AnalysisServiceImpl implements AnalysisService {
             totalPnl = totalPnl.add(pnl);
 
             Map<String, Object> row = new LinkedHashMap<>();
-            row.put("stockCode", text(raw.get("symbol"), ""));
-            row.put("stockName", text(raw.get("securityName"), text(raw.get("symbol"), "")));
+            row.put("stockCode", symbol);
+            row.put("stockName", securityName);
             row.put("industry", industry);
             row.put("weightPct", number(ratio(marketValue, totalMarketValue)));
             row.put("contributionPct", number(contribution));
@@ -264,8 +277,16 @@ public class AnalysisServiceImpl implements AnalysisService {
         result.put("range_start", history.getOrDefault("rangeStart", start.toString()));
         result.put("range_end", history.getOrDefault("rangeEnd", end.toString()));
         result.put("sample_count", history.getOrDefault("tradingDays", 0));
-        result.put("warnings", history.getOrDefault("warnings", List.of()));
-        result.put("calculation_method", history.getOrDefault("calculationMethod", ""));
+        List<Object> warnings = new ArrayList<>(list(history.get("warnings")));
+        if (!qmtCurrent) {
+            warnings.add("个股贡献按终点市值减起点市值计算，包含区间内加仓、减仓和清仓影响，不等同于纯价格收益贡献");
+            warnings.add("returnRate仅表示起止价格涨跌；它与含持仓数量变化的contributionPct可能方向不同");
+            warnings.add("历史快照行业缺失时，使用当前持仓行业或证券名称规则补齐；该分类属于展示级推断");
+        }
+        result.put("warnings", warnings);
+        result.put("calculation_method", qmtCurrent
+                ? history.getOrDefault("calculationMethod", "")
+                : "MySQL历史持仓快照的终点市值减起点市值贡献（包含持仓数量变化）");
         return result;
     }
 
@@ -465,6 +486,9 @@ public class AnalysisServiceImpl implements AnalysisService {
         return value instanceof List<?> list ? list.stream()
                 .filter(Map.class::isInstance).map(item -> (Map<String, Object>) item).toList() : List.of();
     }
+
+    /** 将弱类型列表复制为可追加的对象列表。 */
+    private List<?> list(Object value) { return value instanceof List<?> list ? list : List.of(); }
 
     /** 将可空金额归一化为零，简化后续 BigDecimal 运算。 */
     private BigDecimal zero(BigDecimal value) { return value == null ? BigDecimal.ZERO : value; }
