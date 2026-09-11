@@ -54,6 +54,24 @@ describe('investment assistant session panel', () => {
     expect(request).toHaveBeenCalledTimes(2)
     wrapper.unmount()
   })
+  it('renders assistant Markdown while keeping user content as plain text', async () => {
+    request.mockImplementation(async ({ url }) => ({ data: { code: 0, data:
+      url.endsWith('/messages')
+        ? [
+            { id: 'a', role: 'assistant', content: '**诊断**\n\n| 股票 | 权重 |\n| --- | ---: |\n| 中国移动 | 25.7% |', status: 'COMPLETED' },
+            { id: 'u', role: 'user', content: '**不要渲染我**', status: 'COMPLETED' }
+          ]
+        : [{ id: 'c', title: '历史会话' }]
+    } }))
+
+    const wrapper = mount(InvestmentAssistant)
+    await flushPromises()
+
+    expect(wrapper.get('.assistant-markdown strong').text()).toBe('诊断')
+    expect(wrapper.find('.assistant-markdown table').exists()).toBe(true)
+    expect(wrapper.get('.assistant-message.user').text()).toBe('**不要渲染我**')
+    wrapper.unmount()
+  })
   it('aborts old-user requests on logout/unmount', async () => {
     const wrapper = mount(InvestmentAssistant)
     await flushPromises()

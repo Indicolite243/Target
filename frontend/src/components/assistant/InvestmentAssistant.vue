@@ -22,7 +22,10 @@
       <p v-if="working" class="assistant-progress">{{ phase }} · {{ elapsedSeconds }} 秒</p>
       <div v-if="error" role="alert" class="assistant-error">{{ error }} <button @click="load">重试</button></div>
       <article v-for="message in messages" :key="message.id" :class="['assistant-message', message.role]">
-        {{ message.content }}
+        <!-- Assistant HTML is sanitized by renderSafeMarkdown before rendering. -->
+        <!-- eslint-disable-next-line vue/no-v-html -->
+        <div v-if="message.role === 'assistant'" class="assistant-markdown" v-html="renderSafeMarkdown(message.content)" />
+        <template v-else>{{ message.content }}</template>
         <small v-if="message.role === 'assistant' && message.status && message.status !== 'COMPLETED'" class="message-status">
           {{ statusLabel(message.status) }}
         </small>
@@ -44,6 +47,7 @@
 import { onMounted, onBeforeUnmount, reactive, ref, shallowRef } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { httpClient } from '@/utils/httpClient'
+import { renderSafeMarkdown } from '@/utils/safeMarkdown.js'
 import { streamAssistant } from '@/services/assistantStream.js'
 
 const opened = ref(true)
@@ -223,8 +227,33 @@ button { cursor: pointer; background: #edf4ff; color: #245b9e; border: 0; border
 button:disabled { cursor: not-allowed; opacity: .55; }
 .assistant-launch { position: fixed; right: 20px; bottom: 24px; z-index: 2000; box-shadow: 0 5px 20px #0005; }
 .assistant-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 18px; }
-.assistant-message { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; background: #eaf0f7; padding: 16px; border-radius: 12px; margin-bottom: 14px; }
-.assistant-message.user { background: #dcecff; }
+.assistant-message { min-width: 0; overflow-wrap: anywhere; line-height: 1.8; background: #eaf0f7; padding: 16px; border-radius: 12px; margin-bottom: 14px; }
+.assistant-message.user { white-space: pre-wrap; background: #dcecff; }
+.assistant-markdown { min-width: 0; max-width: 100%; overflow-x: auto; }
+.assistant-markdown :deep(> :first-child) { margin-top: 0; }
+.assistant-markdown :deep(> :last-child) { margin-bottom: 0; }
+.assistant-markdown :deep(h1),
+.assistant-markdown :deep(h2),
+.assistant-markdown :deep(h3),
+.assistant-markdown :deep(h4) { margin: 1em 0 .45em; line-height: 1.4; color: #173a62; }
+.assistant-markdown :deep(h1) { font-size: 20px; }
+.assistant-markdown :deep(h2) { font-size: 18px; }
+.assistant-markdown :deep(h3) { font-size: 16px; }
+.assistant-markdown :deep(h4) { font-size: 14px; }
+.assistant-markdown :deep(p) { margin: .55em 0; }
+.assistant-markdown :deep(ul),
+.assistant-markdown :deep(ol) { margin: .55em 0; padding-left: 1.5em; }
+.assistant-markdown :deep(li) { margin: .25em 0; }
+.assistant-markdown :deep(table) { width: max-content; min-width: 100%; margin: .8em 0; border-collapse: collapse; font-size: 13px; white-space: nowrap; }
+.assistant-markdown :deep(th),
+.assistant-markdown :deep(td) { padding: 7px 10px; text-align: left; border: 1px solid #b9cbe0; }
+.assistant-markdown :deep(th) { color: #173a62; background: #dce9f7; }
+.assistant-markdown :deep(tbody tr:nth-child(even)) { background: #f5f9fd; }
+.assistant-markdown :deep(blockquote) { margin: .7em 0; padding: .1em .8em; color: #51677f; border-left: 3px solid #7ba8d8; }
+.assistant-markdown :deep(pre) { overflow-x: auto; padding: 12px; color: #eef6ff; background: #172a42; border-radius: 8px; }
+.assistant-markdown :deep(code) { padding: .12em .35em; background: #dce6f1; border-radius: 4px; font-family: Consolas, monospace; }
+.assistant-markdown :deep(pre code) { padding: 0; background: transparent; }
+.assistant-markdown :deep(a) { color: #1769aa; text-decoration: underline; }
 .assistant-error { color: #b33232; }
 .assistant-progress { position: sticky; top: 0; z-index: 1; margin: 0 0 12px; padding: 8px 10px; color: #245b9e; background: #edf5ff; border-radius: 8px; }
 .message-status { display: block; margin-top: 8px; color: #9b5b13; }
