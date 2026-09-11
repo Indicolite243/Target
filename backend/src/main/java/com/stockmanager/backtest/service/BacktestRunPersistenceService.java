@@ -33,7 +33,7 @@ public class BacktestRunPersistenceService {
     @Transactional
     public BacktestRun save(Long taskId, Long userId, String strategyFilename, String engineType,
                             String benchmarkSymbol, LocalDate startDate, LocalDate endDate,
-                            String runtimePath, Map<String, Object> result) {
+                            String runtimePath, String strategySource, Map<String, Object> result) {
         // Worker 重试或消息重复投递时直接复用已有结果，不生成第二份回测报告。
         // 先按唯一关联键查询，避免同一个 Worker 被意外重复调用时重复插入报告。
         BacktestRun existing = mapper.selectOne(Wrappers.<BacktestRun>lambdaQuery().eq(BacktestRun::getTaskId, taskId));
@@ -53,6 +53,7 @@ public class BacktestRunPersistenceService {
         run.setEndDate(endDate);
         // 只保存相对任务目录，避免把服务器绝对路径作为接口数据长期暴露。
         run.setRuntimePath(runtimePath);
+        run.setStrategySource(strategySource);
         // 收益曲线、指标、成交记录和执行元数据统一序列化到 MySQL JSON 字段。
         run.setResultJson(json(result));
         run.setCreatedAt(now);

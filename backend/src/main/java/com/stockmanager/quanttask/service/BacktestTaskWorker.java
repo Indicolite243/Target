@@ -7,6 +7,8 @@ import com.stockmanager.common.exception.BusinessException;
 import com.stockmanager.integration.quant.QuantClient;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -42,7 +44,8 @@ public class BacktestTaskWorker {
                     input.benchmarkSymbol(), input.bearProtection(), traceId);
             // FastAPI 成功只代表拿到了内存结果；先将完整报告写入 backtest_run，建立可长期查询的结果记录。
             BacktestRun run = runPersistenceService.save(taskId, userId, input.strategyFilename(), input.engineType(),
-                    input.benchmarkSymbol(), input.startDate(), input.endDate(), input.runtimePath(), result);
+                    input.benchmarkSymbol(), input.startDate(), input.endDate(), input.runtimePath(),
+                    readStrategySource(input), result);
             // 先保存完整结果，再把任务标记成功；这样成功任务一定能追溯到结果主键。
             taskService.succeed(taskId, "BACKTEST", run.getId(), summary(result));
         } catch (BusinessException ex) {
@@ -52,6 +55,12 @@ public class BacktestTaskWorker {
             // 未知异常也要收敛到 FAILED，不能让任务永久停留在 RUNNING。
             taskService.fail(taskId, "BACKTEST_TASK_FAILED", ex.getMessage());
         }
+    }
+
+    /** 源码副本用于后续解释；读取失败不能把已经成功完成的回测改判为失败。 */
+    private String readStrategySource(BacktestInput input) {
+        try { return Files.readString(input.strategyPath(), StandardCharsets.UTF_8); }
+        catch (Exception ignored) { return null; }
     }
 
     @SuppressWarnings("unchecked")

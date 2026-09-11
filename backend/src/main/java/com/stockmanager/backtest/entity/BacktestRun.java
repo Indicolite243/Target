@@ -31,6 +31,8 @@ public class BacktestRun {
     private LocalDate endDate;
     /** 仅保存任务相对目录，不向接口暴露任意本机绝对路径。 */
     private String runtimePath;
+    /** 上传时的策略源码副本；运行目录清理后仍可用于解释和给出修改建议。 */
+    private String strategySource;
     /** 完整回测报告 JSON。 */
     private String resultJson;
     /** 创建时间。 */
