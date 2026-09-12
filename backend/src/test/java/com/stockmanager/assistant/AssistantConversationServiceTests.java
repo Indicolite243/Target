@@ -94,10 +94,11 @@ class AssistantConversationServiceTests {
 
     @Test void executesAttributionToolAndStreamsGroundedAnswer() throws Exception {
         JdbcTemplate jdbc = preparedJdbc();
-        AssistantAttributionToolService attribution = mock(AssistantAttributionToolService.class);
-        when(attribution.getOrCreate(eq(7L), eq("id"), anyString()))
-                .thenReturn(new AssistantAttributionToolService.FrozenAttribution(
-                        "attribution-snapshot", "{\"available\":true}"));
+        AssistantToolGateway toolGateway = mock(AssistantToolGateway.class);
+        when(toolGateway.tools()).thenReturn(List.of(new AssistantModelGateway.ToolDefinition(
+                "get_performance_attribution", "归因", java.util.Map.of("type", "object"))));
+        when(toolGateway.call(any(), any())).thenReturn(new AssistantToolGateway.ToolResult(
+                "{\"available\":true}", java.util.Map.of("attributionSnapshotId", "attribution-snapshot")));
         CountDownLatch generated = new CountDownLatch(1);
         AtomicInteger round = new AtomicInteger();
         AssistantModelGateway gateway = (messages, tools, traceId, consumer, cancellation) -> {
@@ -111,12 +112,12 @@ class AssistantConversationServiceTests {
             generated.countDown();
             return new AssistantModelGateway.StreamResult(List.of());
         };
-        AssistantConversationService service = new AssistantConversationService(
-                jdbc, gateway, null, attribution, null, null);
+        AssistantConversationService service = new AssistantConversationService(jdbc, gateway, toolGateway);
         try {
             service.ask(7, "id", "详细分析业绩归因", "trace");
             assertTrue(generated.await(2, TimeUnit.SECONDS));
-            verify(attribution).getOrCreate(eq(7L), eq("id"), anyString());
+            verify(toolGateway).call(argThat(call -> "get_performance_attribution".equals(call.name())),
+                    argThat(context -> context.userId() == 7L && "id".equals(context.conversationId())));
             verify(jdbc).update(eq("UPDATE ai_message SET attribution_snapshot_id=? WHERE conversation_id=? AND request_id=?"),
                     eq("attribution-snapshot"), eq("id"), anyString());
             verify(jdbc, timeout(2000)).update(eq("UPDATE ai_message SET content=? WHERE id=? AND conversation_id=?"),
@@ -128,10 +129,12 @@ class AssistantConversationServiceTests {
 
     @Test void executesPrivateKnowledgeSearchAndAttachesEvidenceSnapshot() throws Exception {
         JdbcTemplate jdbc = preparedJdbc();
-        AssistantKnowledgeToolService knowledge = mock(AssistantKnowledgeToolService.class);
-        when(knowledge.retrieve(eq(7L), eq("id"), contains("最大回撤"), anyString()))
-                .thenReturn(new AssistantKnowledgeToolService.KnowledgeContext(
-                        "knowledge-snapshot", "{\"available\":true,\"evidence\":[]}"));
+        AssistantToolGateway toolGateway = mock(AssistantToolGateway.class);
+        when(toolGateway.tools()).thenReturn(List.of(new AssistantModelGateway.ToolDefinition(
+                "search_private_knowledge_base", "知识检索", java.util.Map.of("type", "object"))));
+        when(toolGateway.call(any(), any())).thenReturn(new AssistantToolGateway.ToolResult(
+                "{\"available\":true,\"evidence\":[]}",
+                java.util.Map.of("knowledgeSnapshotId", "knowledge-snapshot")));
         CountDownLatch generated = new CountDownLatch(1);
         AtomicInteger round = new AtomicInteger();
         AssistantModelGateway gateway = (messages, tools, traceId, consumer, cancellation) -> {
@@ -145,12 +148,12 @@ class AssistantConversationServiceTests {
             generated.countDown();
             return new AssistantModelGateway.StreamResult(List.of());
         };
-        AssistantConversationService service = new AssistantConversationService(
-                jdbc, gateway, null, null, null, knowledge);
+        AssistantConversationService service = new AssistantConversationService(jdbc, gateway, toolGateway);
         try {
             service.ask(7, "id", "按我的文档解释最大回撤", "trace");
             assertTrue(generated.await(2, TimeUnit.SECONDS));
-            verify(knowledge).retrieve(eq(7L), eq("id"), contains("最大回撤"), anyString());
+            verify(toolGateway).call(argThat(call -> call.arguments().contains("最大回撤")),
+                    argThat(context -> context.userId() == 7L && "id".equals(context.conversationId())));
             verify(jdbc).update(eq("UPDATE ai_message SET knowledge_snapshot_id=? WHERE conversation_id=? AND request_id=?"),
                     eq("knowledge-snapshot"), eq("id"), anyString());
         } finally {

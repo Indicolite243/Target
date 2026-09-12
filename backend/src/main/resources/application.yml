@@ -98,6 +98,11 @@ app:
   assistant:
     knowledge:
       storage-root: ${ASSISTANT_KNOWLEDGE_STORAGE_ROOT:../runtime/knowledge}
+    mcp:
+      base-url: ${ASSISTANT_MCP_BASE_URL:http://127.0.0.1:${SERVER_PORT:8080}}
+      endpoint: ${ASSISTANT_MCP_ENDPOINT:/internal/mcp}
+      internal-token: ${ASSISTANT_MCP_INTERNAL_TOKEN:${QUANT_INTERNAL_TOKEN:development-internal-token}}
+      request-timeout-seconds: ${ASSISTANT_MCP_REQUEST_TIMEOUT_SECONDS:45}
 
 springdoc:
   swagger-ui:

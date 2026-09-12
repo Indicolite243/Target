@@ -2,6 +2,8 @@ package com.stockmanager.config;
 
 import com.stockmanager.system.auth.security.JwtAuthenticationFilter;
 import com.stockmanager.system.auth.security.CompatiblePasswordEncoder;
+import com.stockmanager.assistant.mcp.InternalMcpTokenFilter;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -25,7 +27,10 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 public class SecurityConfig {
     /** 构建无状态 Spring Security 过滤器链。 */
     @Bean
-    SecurityFilterChain securityFilterChain(HttpSecurity http, JwtAuthenticationFilter jwtFilter) throws Exception {
+    SecurityFilterChain securityFilterChain(HttpSecurity http, JwtAuthenticationFilter jwtFilter,
+            @Value("${app.assistant.mcp.internal-token}") String mcpInternalToken,
+            @Value("${app.assistant.mcp.endpoint:/internal/mcp}") String configuredMcpEndpoint) throws Exception {
+        String mcpEndpoint = InternalMcpTokenFilter.normalizeEndpoint(configuredMcpEndpoint);
         /*
          * 安全边界：
          * 请求 -> JwtAuthenticationFilter -> SecurityContext -> anyRequest().authenticated()
@@ -39,7 +44,9 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .requestMatchers("/api/v1/auth/register", "/api/v1/auth/login",
                                 "/api/v1/health", "/actuator/health", "/v3/api-docs/**", "/swagger-ui/**").permitAll()
+                        .requestMatchers(mcpEndpoint, mcpEndpoint + "/**").permitAll()
                         .anyRequest().authenticated())
+                .addFilterBefore(new InternalMcpTokenFilter(mcpInternalToken, mcpEndpoint), JwtAuthenticationFilter.class)
                 .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
                 .build();
     }

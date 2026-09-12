@@ -64,6 +64,7 @@ $env:MYSQL_USERNAME='root'
 $env:MYSQL_PASSWORD='你的MySQL密码'
 $env:JWT_SECRET='替换为至少32字节的随机开发密钥'
 $env:QUANT_INTERNAL_TOKEN='development-internal-token'
+$env:ASSISTANT_MCP_INTERNAL_TOKEN='替换为独立的随机内部令牌'
 ```
 
 QMT 路径建议使用正斜杠，避免 Spring 把 `\u` 当作 properties 转义：
@@ -105,6 +106,11 @@ mvn spring-boot:run
 ```
 
 健康检查：`http://127.0.0.1:8080/api/v1/health`。Swagger：`http://127.0.0.1:8080/swagger-ui.html`。
+
+投研 Agent 通过官方 Java SDK 连接同一应用内的 Streamable HTTP MCP 服务。默认地址为
+`http://127.0.0.1:8080/internal/mcp`，只接受 `X-Internal-Token`，不直接暴露给浏览器。
+启动端口变化时，将 `ASSISTANT_MCP_BASE_URL` 一并改为对应地址；生产环境必须使用独立的
+`ASSISTANT_MCP_INTERNAL_TOKEN`。
 
 也可直接运行 `D:\Target\start-backend.ps1`。
 

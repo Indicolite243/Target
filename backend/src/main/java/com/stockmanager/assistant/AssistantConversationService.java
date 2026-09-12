@@ -15,8 +15,8 @@ import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Map;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -43,50 +43,29 @@ public class AssistantConversationService {
             使用通用知识时标明未由本地数据验证且可能存在时效限制，不得编造任何账户事实。
             不得声称已经下单、修改持仓、运行回测或写入策略文件。除非用户明确要求，否则不输出源码。
             """;
-    private static final List<AssistantModelGateway.ToolDefinition> ASSISTANT_TOOLS = List.of(
-            new AssistantModelGateway.ToolDefinition("get_current_portfolio_snapshot",
-                    "读取当前登录用户唯一账户在 MySQL 中最近确认并冻结到本会话的账户总览、完整持仓与集中度指标。仅在问题依赖实际账户数据时调用。",
-                    Map.of("type", "object", "properties", Map.of(), "additionalProperties", false)),
-            new AssistantModelGateway.ToolDefinition("get_performance_attribution",
-                    "读取当前登录用户唯一账户最近30天的MySQL历史持仓快照，返回会话冻结的个股与行业收益贡献、区间和计算口径。询问收益来源、个股贡献或行业贡献时调用。",
-                    Map.of("type", "object", "properties", Map.of(), "additionalProperties", false)),
-            new AssistantModelGateway.ToolDefinition("get_latest_backtest_analysis_data",
-                    "选择并固定当前用户最近创建的回测任务，读取其状态；成功时返回指标和全区间抽样收益曲线，不返回源码。回测分析时调用。",
-                    Map.of("type", "object", "properties", Map.of(), "additionalProperties", false)),
-            new AssistantModelGateway.ToolDefinition("get_selected_backtest_strategy_source",
-                    "读取本会话已选回测的策略源码；仅当用户明确要求查看、解释或修改源码时调用。",
-                    Map.of("type", "object", "properties", Map.of(), "additionalProperties", false)),
-            new AssistantModelGateway.ToolDefinition("search_private_knowledge_base",
-                    "检索当前登录用户上传的私有投研文档。询问文档方法、风险规则、策略说明，或需要文档证据辅助回答时调用。",
-                    Map.of("type", "object", "properties", Map.of("query", Map.of(
-                            "type", "string", "description", "用于检索私有文档的完整问题")),
-                            "required", List.of("query"), "additionalProperties", false)));
+    private static final AssistantToolGateway NO_TOOLS = new AssistantToolGateway() {
+        @Override public List<AssistantModelGateway.ToolDefinition> tools() { return List.of(); }
+        @Override public ToolResult call(AssistantModelGateway.ToolCall call, InvocationContext context) {
+            throw new IllegalStateException("MCP 工具服务尚未配置");
+        }
+    };
     private final JdbcTemplate jdbc;
     private final AssistantModelGateway modelGateway;
-    private final AssistantPortfolioSnapshotService snapshotService;
-    private final AssistantAttributionToolService attributionToolService;
-    private final AssistantBacktestToolService backtestToolService;
-    private final AssistantKnowledgeToolService knowledgeToolService;
+    private final AssistantToolGateway toolGateway;
     private final ExecutorService generationExecutor = Executors.newVirtualThreadPerTaskExecutor();
     private final ConcurrentHashMap<String, ActiveGeneration> active = new ConcurrentHashMap<>();
 
     @Autowired
     public AssistantConversationService(JdbcTemplate jdbc, AssistantModelGateway modelGateway,
-                                        AssistantPortfolioSnapshotService snapshotService,
-                                        AssistantAttributionToolService attributionToolService,
-                                        AssistantBacktestToolService backtestToolService,
-                                        AssistantKnowledgeToolService knowledgeToolService) {
+                                        AssistantToolGateway toolGateway) {
         this.jdbc = jdbc;
         this.modelGateway = modelGateway;
-        this.snapshotService = snapshotService;
-        this.attributionToolService = attributionToolService;
-        this.backtestToolService = backtestToolService;
-        this.knowledgeToolService = knowledgeToolService;
+        this.toolGateway = toolGateway;
     }
     AssistantConversationService(JdbcTemplate jdbc, AssistantModelGateway modelGateway) {
-        this(jdbc, modelGateway, null, null, null, null);
+        this(jdbc, modelGateway, NO_TOOLS);
     }
-    AssistantConversationService(JdbcTemplate jdbc) { this(jdbc, null, null, null, null, null); }
+    AssistantConversationService(JdbcTemplate jdbc) { this(jdbc, null, NO_TOOLS); }
     public record Conversation(String id, String title, LocalDateTime createdAt, LocalDateTime updatedAt) {}
     public record Message(String id, String role, String content, String status, LocalDateTime createdAt) {}
 
@@ -152,7 +131,7 @@ public class AssistantConversationService {
         String assistantMessageId = UUID.randomUUID().toString();
         SseEmitter emitter = new SseEmitter(320_000L);
         ActiveGeneration generation = new ActiveGeneration(userId, id, requestId, userMessageId,
-                assistantMessageId, emitter);
+                assistantMessageId, traceId, emitter);
         if (active.putIfAbsent(id, generation) != null)
             throw new BusinessException(409101, "当前会话正在生成回答，请先停止", HttpStatus.CONFLICT);
 
@@ -220,7 +199,8 @@ public class AssistantConversationService {
         try {
             emit(generation.emitter, "status", Map.of("phase", "SELECTING", "message", "正在判断所需数据"));
             StringBuffer directAnswer = new StringBuffer();
-            AssistantModelGateway.StreamResult plan = modelGateway.stream(context, ASSISTANT_TOOLS, traceId,
+            List<AssistantModelGateway.ToolDefinition> availableTools = toolGateway.tools();
+            AssistantModelGateway.StreamResult plan = modelGateway.stream(context, availableTools, traceId,
                     event -> { if ("delta".equals(event.type()) && event.text() != null) directAnswer.append(event.text()); }, generation);
             if (plan.requestedTools()) {
                 emit(generation.emitter, "status", Map.of("phase", "READING_DATA", "message", "正在读取会话固定的数据"));
@@ -258,47 +238,52 @@ public class AssistantConversationService {
     }
 
     private String toolResult(ActiveGeneration generation, AssistantModelGateway.ToolCall call) {
-        if ("get_current_portfolio_snapshot".equals(call.name())) {
-            if (snapshotService == null) throw new QwenAssistantModelGateway.AssistantGatewayException("账户工具尚未配置");
-            AssistantPortfolioSnapshotService.FrozenSnapshot snapshot = snapshotService.getOrCreate(
-                    generation.userId, generation.conversationId);
-            generation.snapshotId = snapshot.id();
-            jdbc.update("UPDATE ai_message SET snapshot_id=? WHERE conversation_id=? AND request_id=?",
-                    snapshot.id(), generation.conversationId, generation.requestId);
-            return snapshot.modelJson();
-        }
-        if ("get_performance_attribution".equals(call.name())) {
-            if (attributionToolService == null)
-                throw new QwenAssistantModelGateway.AssistantGatewayException("业绩归因工具尚未配置");
-            AssistantAttributionToolService.FrozenAttribution attribution = attributionToolService.getOrCreate(
-                    generation.userId, generation.conversationId, generation.requestId);
-            jdbc.update("UPDATE ai_message SET attribution_snapshot_id=? WHERE conversation_id=? AND request_id=?",
-                    attribution.id(), generation.conversationId, generation.requestId);
-            return attribution.modelJson();
-        }
-        if ("get_latest_backtest_analysis_data".equals(call.name())
-                || "get_selected_backtest_strategy_source".equals(call.name())) {
-            if (backtestToolService == null) throw new QwenAssistantModelGateway.AssistantGatewayException("回测工具尚未配置");
-            boolean includeSource = "get_selected_backtest_strategy_source".equals(call.name());
-            AssistantBacktestToolService.SelectedBacktest selected = backtestToolService.getOrSelect(
-                    generation.userId, generation.conversationId, includeSource);
-            if (selected.taskId() != null) {
-                generation.backtestTaskId = selected.taskId();
-                jdbc.update("UPDATE ai_message SET backtest_task_id=? WHERE conversation_id=? AND request_id=?",
-                        selected.taskId(), generation.conversationId, generation.requestId);
+        try {
+            AssistantToolGateway.ToolResult result = toolGateway.call(call,
+                    new AssistantToolGateway.InvocationContext(generation.userId, generation.conversationId,
+                            generation.requestId, generation.traceId));
+            String snapshotId = textMetadata(result.metadata(), "snapshotId");
+            if (snapshotId != null) {
+                generation.snapshotId = snapshotId;
+                jdbc.update("UPDATE ai_message SET snapshot_id=? WHERE conversation_id=? AND request_id=?",
+                        snapshotId, generation.conversationId, generation.requestId);
             }
-            return selected.modelJson();
+            String attributionSnapshotId = textMetadata(result.metadata(), "attributionSnapshotId");
+            if (attributionSnapshotId != null)
+                jdbc.update("UPDATE ai_message SET attribution_snapshot_id=? WHERE conversation_id=? AND request_id=?",
+                        attributionSnapshotId, generation.conversationId, generation.requestId);
+            String knowledgeSnapshotId = textMetadata(result.metadata(), "knowledgeSnapshotId");
+            if (knowledgeSnapshotId != null)
+                jdbc.update("UPDATE ai_message SET knowledge_snapshot_id=? WHERE conversation_id=? AND request_id=?",
+                        knowledgeSnapshotId, generation.conversationId, generation.requestId);
+            Long backtestTaskId = longMetadata(result.metadata(), "backtestTaskId");
+            if (backtestTaskId != null) {
+                generation.backtestTaskId = backtestTaskId;
+                jdbc.update("UPDATE ai_message SET backtest_task_id=? WHERE conversation_id=? AND request_id=?",
+                        backtestTaskId, generation.conversationId, generation.requestId);
+            }
+            return result.content();
+        } catch (QwenAssistantModelGateway.AssistantGatewayException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            throw new QwenAssistantModelGateway.AssistantGatewayException(
+                    exception.getMessage() == null || exception.getMessage().isBlank()
+                            ? "MCP 工具服务暂时不可用" : exception.getMessage());
         }
-        if ("search_private_knowledge_base".equals(call.name())) {
-            if (knowledgeToolService == null)
-                throw new QwenAssistantModelGateway.AssistantGatewayException("知识库工具尚未配置");
-            AssistantKnowledgeToolService.KnowledgeContext knowledge = knowledgeToolService.retrieve(
-                    generation.userId, generation.conversationId, call.arguments(), generation.requestId);
-            jdbc.update("UPDATE ai_message SET knowledge_snapshot_id=? WHERE conversation_id=? AND request_id=?",
-                    knowledge.id(), generation.conversationId, generation.requestId);
-            return knowledge.modelJson();
+    }
+
+    private String textMetadata(Map<String, Object> metadata, String key) {
+        Object value = metadata.get(key);
+        return value == null || String.valueOf(value).isBlank() ? null : String.valueOf(value);
+    }
+
+    private Long longMetadata(Map<String, Object> metadata, String key) {
+        Object value = metadata.get(key);
+        if (value instanceof Number number) return number.longValue();
+        if (value instanceof String text && !text.isBlank()) {
+            try { return Long.parseLong(text); } catch (NumberFormatException ignored) { }
         }
-        return "{\"available\":false,\"reason\":\"不允许的工具\"}";
+        return null;
     }
 
     private void acceptLiveEvent(ActiveGeneration generation, AssistantModelGateway.ModelEvent event) {
@@ -359,6 +344,7 @@ public class AssistantConversationService {
         private final String requestId;
         private final String userMessageId;
         private final String assistantMessageId;
+        private final String traceId;
         private final SseEmitter emitter;
         private final StringBuffer content = new StringBuffer();
         private final AtomicBoolean cancelled = new AtomicBoolean(false);
@@ -370,9 +356,10 @@ public class AssistantConversationService {
         private volatile Long backtestTaskId;
 
         private ActiveGeneration(long userId, String conversationId, String requestId, String userMessageId,
-                                 String assistantMessageId, SseEmitter emitter) {
+                                 String assistantMessageId, String traceId, SseEmitter emitter) {
             this.userId = userId; this.conversationId = conversationId; this.requestId = requestId;
-            this.userMessageId = userMessageId; this.assistantMessageId = assistantMessageId; this.emitter = emitter;
+            this.userMessageId = userMessageId; this.assistantMessageId = assistantMessageId;
+            this.traceId = traceId; this.emitter = emitter;
         }
         @Override public boolean cancelled() { return cancelled.get(); }
         @Override public void attach(Closeable closeable) {

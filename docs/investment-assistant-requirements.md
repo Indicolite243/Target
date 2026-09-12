@@ -13,7 +13,7 @@
 
 复用现有 Vue、Spring Security/JWT、MyBatis-Plus、MySQL/Flyway、Redis 和 FastAPI。Java 管理身份、账户归属、会话、冻结快照、受控工具执行及流式网关；Python 独立 AI 模块负责千问调用和 Function Calling 协议适配，后续再承载检索与分析计算。保持 QMT 采集和 AI 长耗时处理隔离。
 
-借鉴 MewHelp 截图中的混合 RAG、RRF、重排、Function Calling、上下文管理与可观测性。第一阶段不引入 LangGraph、多 Agent、Milvus 集群、RoBERTa 微调或新消息队列。先以受控工具调用循环完成任务，RAG 使用可替换的向量检索适配器与 BM25，后续按数据规模选择存储。MCP 用于有跨客户端复用价值的只读工具，不为已有内部接口重复增加网络层。
+借鉴 MewHelp 截图中的混合 RAG、RRF、重排、Function Calling、上下文管理与可观测性。第一阶段不引入 LangGraph、多 Agent、Milvus 集群、RoBERTa 微调或新消息队列。以受控工具调用循环完成任务，RAG 使用可替换的向量检索适配器与 BM25，后续按数据规模选择存储。适合跨客户端复用的只读投研能力使用官方 Java SDK 和 Streamable HTTP MCP；会话 UI 与内部 CRUD 不为了形式重复包装成 MCP。
 
 ## 产品与交互
 
@@ -70,7 +70,7 @@
 
 - 已新增 V12 会话/消息表迁移、按用户隔离的会话 CRUD 接口及固定欢迎消息。
 - 已新增全局悬浮面板、历史会话、新建、重命名、删除、关闭恢复；助手默认启用，可用 VITE_ASSISTANT_ENABLED=false 临时关闭。
-- 浏览器流式问答、持久化、阶段计时和主动停止已经接通；当前持仓、最近30天个股/行业收益贡献、最近回测、按需源码工具和用户私有知识库 RAG 已经接通。
+- 浏览器流式问答、持久化、阶段计时和主动停止已经接通；当前持仓、最近30天个股/行业收益贡献、最近回测、按需源码工具和用户私有知识库 RAG 已经接通，并统一由 MCP 工具服务提供给 Agent。
 - 用户已选择千问，沿用学习项目的 qwen3.7-plus，temperature=0.2；模型名称和地址可通过环境变量调整。
 - 本机 MySQL 已由 Flyway 成功执行 V12 至 V17，当前 schema 为 v17；V14 新增会话数据快照，V15 新增会话所选回测、消息追溯和后续回测的源码持久化字段，V16 新增归因快照类型及消息追溯关系，V17 新增按用户隔离的知识文档、切片、向量和知识证据追溯关系。
 - 临时 docs/diagram-test.png 保留本地，未纳入改造前备份。
@@ -95,5 +95,7 @@
 - 已实现用户私有知识库：页面管理 PDF、DOCX、MD、TXT 文档；Java 负责格式/大小校验、Tika 正文提取、切片、MySQL 元数据和用户归属；FastAPI 使用百炼 `text-embedding-v4` 生成 1024 维向量。检索按当前用户同时约束文档与切片，以向量相似度和轻量词法匹配进行 RRF 融合，最多向模型提供 6 条带 `[K编号]` 的证据。
 - 每次知识工具调用都把查询、文档名、切片正文、分数与 Embedding 模型冻结为 `KNOWLEDGE` 快照，并由回答消息保存快照外键；删除原文档不会改写已有回答的证据链。
 - 真实浏览器验证：修正公共 Axios JSON 请求头对 multipart 上传的干扰后，测试 Markdown 文档成功进入 `READY`；千问通过 `search_private_knowledge_base` 准确解释文档中的专有“北极星规则”和“蓝港检查”，并返回文档名及 `[K1]` 引用。测试会话、文档、切片、快照和存储文件随后全部清理。
-- 本阶段回归验证：Spring Boot 43 项、Vue 14 项、FastAPI 41 项测试通过，Vue 生产构建通过。
-- 下一步把适合跨客户端复用的只读持仓、归因、回测和知识检索能力暴露为 MCP 工具；不把会话 UI 或内部 CRUD 为了形式重复包装成 MCP。
+- 已接入官方 MCP Java SDK 1.1.1：应用内提供受内部令牌保护的 Streamable HTTP MCP Server，Agent 启动工具循环时通过 MCP `tools/list` 自动发现工具、通过 `tools/call` 调用。当前开放持仓快照、业绩归因、最近回测、按需策略源码和私有知识检索 5 个只读工具。
+- 用户 ID、会话 ID、请求 ID 与追踪 ID 由可信 Java Agent 作为 MCP 请求元数据注入，不出现在提供给模型的工具参数中；服务端继续执行用户归属校验和会话快照冻结。
+- MCP 端点默认为 `/internal/mcp`，不接受浏览器 JWT，使用独立 `X-Internal-Token` 边界；端点、地址、令牌与超时均可通过环境变量配置。
+- 本阶段回归验证：Spring Boot 测试（含真实 Streamable HTTP MCP 初始化、工具发现和工具调用）、Vue 14 项、FastAPI 41 项测试通过，Vue 生产构建通过。
