@@ -156,8 +156,7 @@ public class AssistantBacktestToolService {
     private Map<String, Object> execution(Map<String, Object> meta, Map<String, Object> engine) {
         Map<String, Object> result = new LinkedHashMap<>();
         for (String key : List.of("requested_engine", "resolved_engine", "executor_type", "strategy_format",
-                "benchmark_symbol_requested", "benchmark_symbol", "benchmark_data_source", "benchmark_warning",
-                "bear_protection_enabled", "source", "is_mock")) {
+                "benchmark_symbol", "bear_protection_enabled", "source", "is_mock")) {
             if (meta.containsKey(key)) result.put(key, meta.get(key));
         }
         result.put("engineParameters", meta.containsKey("engine_info") ? map(meta.get("engine_info")) : engine);

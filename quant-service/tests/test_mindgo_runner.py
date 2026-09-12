@@ -11,33 +11,7 @@ def make_engine(monkeypatch, tmp_path):
     monkeypatch.setenv("BACKTEST_RESULT_JSON_PATH", str(tmp_path / "result.json"))
     monkeypatch.setenv("BACKTEST_START_DATE", "2024-01-01")
     monkeypatch.setenv("BACKTEST_END_DATE", "2024-12-31")
-    monkeypatch.setenv("BACKTEST_XTDATA_ENABLED", "false")
     return mindgo_runner.MindgoBacktestEngine(tmp_path / "strategy.py")
-
-
-def test_offline_benchmark_uses_disclosed_local_etf_proxy(monkeypatch, tmp_path):
-    engine = make_engine(monkeypatch, tmp_path)
-    proxy = tmp_path / "510300.SH.xlsx"
-    proxy.touch()
-    expected = pd.DataFrame(
-        {"close": [100.0, 101.0]},
-        index=pd.to_datetime(["2024-01-02", "2024-01-03"]),
-    )
-    monkeypatch.setattr(engine, "_load_single_symbol", lambda code: expected)
-
-    actual = engine._load_benchmark_symbol("000300.SH")
-
-    assert actual is expected
-    assert engine.benchmark_symbol_used == "510300.SH"
-    assert engine.benchmark_data_source == "local_proxy"
-    assert "不能视为指数精确回测" in engine.benchmark_warning
-
-
-def test_offline_benchmark_without_exact_or_proxy_file_is_actionable(monkeypatch, tmp_path):
-    engine = make_engine(monkeypatch, tmp_path)
-
-    with pytest.raises(FileNotFoundError, match="请上传基准行情文件"):
-        engine._load_benchmark_symbol("399006.SZ")
 
 
 def test_order_uses_raw_open_half_slippage_lot_and_daily_volume_limit(monkeypatch, tmp_path):
@@ -101,7 +75,6 @@ def test_pre_adjusted_price_is_dynamically_anchored_to_query_end(monkeypatch, tm
 
 def test_corporate_action_adjusts_cash_shares_and_cost(monkeypatch, tmp_path):
     engine = make_engine(monkeypatch, tmp_path)
-    engine.xtdata_enabled = True
     engine.context.portfolio.cash = 0.0
     engine.context.portfolio.positions["510500.SH"] = mindgo_runner.Position(amount=100, avg_cost=10.0)
     factors = pd.DataFrame(

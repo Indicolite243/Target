@@ -31,7 +31,6 @@ class AssistantBacktestToolServiceTests {
         assertThat(result.taskId()).isEqualTo(9L);
         assertThat(result.modelJson())
                 .contains("\"originalPointCount\":500", "\"sampledPointCount\":240", "\"downsampled\":true")
-                .contains("\"benchmark_symbol\":\"510300.SH\"", "不能视为指数精确回测")
                 .doesNotContain("strategySource", "def init");
         verify(jdbc).update(contains("active_backtest_task_id"), any(Object[].class));
     }
@@ -93,12 +92,7 @@ class AssistantBacktestToolServiceTests {
         List<Integer> series = IntStream.range(0, 500).boxed().toList();
         Map<String, Object> data = Map.of(
                 "dates", series, "strategy", series, "benchmark", series, "excess", series,
-                "metrics", Map.of("sharpe_ratio", "1.20", "max_drawdown", "12.00%"),
-                "execution_meta", Map.of(
-                        "benchmark_symbol_requested", "000300.SH",
-                        "benchmark_symbol", "510300.SH",
-                        "benchmark_data_source", "local_proxy",
-                        "benchmark_warning", "不能视为指数精确回测"));
+                "metrics", Map.of("sharpe_ratio", "1.20", "max_drawdown", "12.00%"));
         when(row.getString("result_json")).thenReturn(new ObjectMapper().writeValueAsString(Map.of("data", data)));
         return row;
     }

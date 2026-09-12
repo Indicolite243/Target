@@ -22,14 +22,6 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
-
-# QMT 不可用时，只允许使用项目已打包、且跟踪关系明确的本地 ETF 作为指数代理。
-# 代理基准会写入结果元数据和页面，不能冒充原指数行情。
-LOCAL_BENCHMARK_PROXIES = {
-    "000300.SH": "510300.SH",
-    "000905.SH": "510500.SH",
-}
-
 def _load_xtdata_module():
     """尽力加载xtdata；不可用时返回None，让打包行情仍可独立回测。"""
 
@@ -181,14 +173,6 @@ class MindgoBacktestEngine:
         self.start_date = pd.Timestamp(os.environ.get("BACKTEST_START_DATE", "2020-01-01"))
         self.end_date = pd.Timestamp(os.environ.get("BACKTEST_END_DATE", "2025-01-01"))
         self.benchmark_symbol = os.environ.get("BACKTEST_BENCHMARK", "000300.SH")
-        self.benchmark_symbol_used = self.benchmark_symbol
-        self.benchmark_data_source = "unresolved"
-        self.benchmark_warning = ""
-        # 回测默认只使用本地或用户上传的行情，账户客户端掉线不应影响历史策略计算。
-        # 确有需要时可显式开启 xtdata 补齐；开启后连接失败仍会回退到本地代理基准。
-        self.xtdata_enabled = xtdata is not None and os.environ.get(
-            "BACKTEST_XTDATA_ENABLED", "false"
-        ).strip().lower() in {"1", "true", "yes", "on"}
         self.log = StrategyLogger()
         # 策略可在init中覆盖佣金、滑点和成交量限制；这里保存安全默认值。
         self.commission_rate = 0.0
@@ -233,13 +217,7 @@ class MindgoBacktestEngine:
 
         file_path = self.data_dir / f"{code}.xlsx"
         if not file_path.exists():
-            if self.xtdata_enabled:
-                downloaded = self._load_xtdata_symbol(code)
-                self.data_cache[code] = downloaded
-                return downloaded
-            raise FileNotFoundError(
-                f"未找到本地行情文件: {file_path.name}；请上传该文件，或显式开启 BACKTEST_XTDATA_ENABLED"
-            )
+            raise FileNotFoundError(f"未找到行情文件: {file_path}")
 
         # 显式使用openpyxl保证xlsx解析器一致，并清理Excel表头两侧空格。
         df = pd.read_excel(file_path, engine="openpyxl")
@@ -285,7 +263,7 @@ class MindgoBacktestEngine:
     def _extend_with_xtdata(self, code, frame):
         """当本地行情未覆盖回测区间时合并xtdata数据，并校准复权序列尺度。"""
 
-        if not self.xtdata_enabled or frame.empty:
+        if xtdata is None or frame.empty:
             return frame
         need_before = self.start_date < frame.index.min()
         need_after = self.end_date > frame.index.max()
@@ -323,7 +301,7 @@ class MindgoBacktestEngine:
     def _download_xtdata_frame(self, code):
         """下载原始和前复权日线，整理成引擎统一的九列行情表。"""
 
-        if not self.xtdata_enabled:
+        if xtdata is None:
             return None
         # 向前多取约一年，为动量指标和首日基准价格提供预热数据。
         start_time = (self.start_date - pd.Timedelta(days=370)).strftime("%Y%m%d")
@@ -380,8 +358,8 @@ class MindgoBacktestEngine:
 
         if code in self.benchmark_cache:
             return self.benchmark_cache[code]
-        if not self.xtdata_enabled:
-            raise FileNotFoundError(f"未找到本地行情文件，且回测未启用 xtdata: {code}")
+        if xtdata is None:
+            raise FileNotFoundError(f"未找到行情文件，且 xtdata 不可用: {code}")
 
         df = self._download_xtdata_frame(code)
         if df is None or df.empty:
@@ -391,41 +369,12 @@ class MindgoBacktestEngine:
         return df
 
     def _load_benchmark_symbol(self, code):
-        """优先读取精确本地基准，其次可选 xtdata，最后使用明确标注的本地 ETF 代理。"""
+        """基准优先使用同目录打包文件，不存在时再访问xtdata。"""
 
         file_path = self.data_dir / f"{code}.xlsx"
         if file_path.exists():
-            self.benchmark_symbol_used = code
-            self.benchmark_data_source = "local_exact"
-            self.benchmark_warning = ""
             return self._load_single_symbol(code)
-        if self.xtdata_enabled:
-            try:
-                value = self._load_xtdata_symbol(code)
-                self.benchmark_symbol_used = code
-                self.benchmark_data_source = "xtdata"
-                self.benchmark_warning = ""
-                return value
-            except Exception as exc:
-                # 当前回测进程内熔断后续 QMT 调用，避免一个离线客户端造成多次连接超时。
-                self.xtdata_enabled = False
-                self.log.warning(f"{code} 基准行情通过 xtdata 获取失败，尝试本地代理: {exc}")
-
-        proxy = LOCAL_BENCHMARK_PROXIES.get(code)
-        proxy_path = self.data_dir / f"{proxy}.xlsx" if proxy else None
-        if proxy_path is not None and proxy_path.exists():
-            self.benchmark_symbol_used = proxy
-            self.benchmark_data_source = "local_proxy"
-            self.benchmark_warning = (
-                f"未取得 {code} 指数行情，本次使用本地 {proxy} ETF 作为代理基准；"
-                "结果包含跟踪误差、费用和分红口径差异，不能视为指数精确回测。"
-            )
-            self.log.warning(self.benchmark_warning)
-            return self._load_single_symbol(proxy)
-
-        raise FileNotFoundError(
-            f"缺少基准行情 {code}.xlsx，且没有可用的本地代理；请上传基准行情文件"
-        )
+        return self._load_xtdata_symbol(code)
 
     def get_price(self, code, start_date=None, end_date=None, bar_count=None, fre_step="1d", fields=None, skip_paused=True, fq=None):
         """实现MindGo历史行情API，并保证策略只能按传入截止日读取数据。"""
@@ -684,7 +633,7 @@ class MindgoBacktestEngine:
         if code in self.corporate_actions_cache:
             return self.corporate_actions_cache[code]
         actions = {}
-        if self.xtdata_enabled:
+        if xtdata is not None:
             try:
                 # 事件按除权日期YYYYMMDD索引，字段统一转float便于撮合计算。
                 frame = xtdata.get_divid_factors(code)
@@ -972,17 +921,12 @@ class MindgoBacktestEngine:
             "excess": excess_returns,
             "_skip_normalization": True,
             "benchmark_symbol": self.benchmark_symbol,
-            "benchmark_symbol_used": self.benchmark_symbol_used,
-            "benchmark_data_source": self.benchmark_data_source,
-            "warnings": [self.benchmark_warning] if self.benchmark_warning else [],
             "engine": {
                 "engine_type": "mindgo_runner",
                 "slippage_perc": self.slippage_perc,
                 "commission_rate": self.commission_rate,
                 "volume_limit_ratio": self.volume_limit_ratio,
                 "risk_free_rate": self.risk_free_rate,
-                "xtdata_enabled": self.xtdata_enabled,
-                "benchmark_data_source": self.benchmark_data_source,
             },
             "artifacts": self.artifacts,
             "metrics": metrics,
