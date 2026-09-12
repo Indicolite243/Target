@@ -42,7 +42,9 @@ public final class InternalMcpTokenFilter extends OncePerRequestFilter {
         String supplied = request.getHeader(HEADER);
         byte[] actual = supplied == null ? new byte[0] : supplied.getBytes(StandardCharsets.UTF_8);
         if (!MessageDigest.isEqual(expected, actual)) {
-            response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "MCP authentication required");
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            response.setContentType("application/json;charset=UTF-8");
+            response.getWriter().write("{\"error\":\"MCP authentication required\"}");
             return;
         }
         chain.doFilter(request, response);

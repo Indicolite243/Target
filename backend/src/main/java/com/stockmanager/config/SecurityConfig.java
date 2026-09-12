@@ -46,8 +46,8 @@ public class SecurityConfig {
                                 "/api/v1/health", "/actuator/health", "/v3/api-docs/**", "/swagger-ui/**").permitAll()
                         .requestMatchers(mcpEndpoint, mcpEndpoint + "/**").permitAll()
                         .anyRequest().authenticated())
-                .addFilterBefore(new InternalMcpTokenFilter(mcpInternalToken, mcpEndpoint), JwtAuthenticationFilter.class)
                 .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(new InternalMcpTokenFilter(mcpInternalToken, mcpEndpoint), JwtAuthenticationFilter.class)
                 .build();
     }
 
