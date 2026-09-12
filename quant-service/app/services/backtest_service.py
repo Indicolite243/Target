@@ -290,6 +290,9 @@ async def run_backtest(
         raise BacktestError("回测结果 JSON 无法读取", detail=str(exc)) from exc
     # execution_meta记录文件摘要和执行选择，不保存策略全文或敏感账户信息。
     # execution_meta 用于结果页说明“谁、以什么引擎和参数执行”，不参与收益指标计算。
+    requested_benchmark = normalized.get("benchmark_symbol") or env["BACKTEST_BENCHMARK"]
+    used_benchmark = normalized.get("benchmark_symbol_used") or requested_benchmark
+    warnings = list(normalized.get("warnings") or [])
     normalized["execution_meta"] = {
         "request_id": request_id,
         "uploaded_filename": strategy_file.filename,
@@ -298,7 +301,10 @@ async def run_backtest(
         "resolved_engine": resolved_engine,
         "executor_type": "mindgo_runner" if resolved_engine == "mindgo" else "python_script",
         "strategy_format": "mindgo" if resolved_engine == "mindgo" else "python",
-        "benchmark_symbol": env["BACKTEST_BENCHMARK"],
+        "benchmark_symbol": used_benchmark,
+        "benchmark_symbol_requested": requested_benchmark,
+        "benchmark_data_source": normalized.get("benchmark_data_source", "strategy_output"),
+        "benchmark_warning": warnings[0] if warnings else "",
         "bear_protection_enabled": enable_bear_protection,
         "uploaded_market_files": uploaded_market_files,
         "source": "uploaded_strategy_execution",

@@ -98,6 +98,8 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 QMT 模式不要使用 `--reload`，也不要启动多个 Python 副本；每个副本都会建立一个新的 XtQuant 会话。也可直接运行 `D:\Target\start-quant.ps1`。
 
+历史回测默认使用项目内置或用户上传的 Excel 行情，并设置 `BACKTEST_XTDATA_ENABLED=false`，因此不依赖 QMT 登录。缺少沪深300指数文件时，会明确使用本地 `510300.SH` ETF 作为代理基准，并在结果页显示代理说明；如需精确指数基准，应上传 `000300.SH.xlsx`，或在 QMT 可用时显式开启 xtdata 补齐。
+
 ### 5. Spring Boot
 
 ```powershell
