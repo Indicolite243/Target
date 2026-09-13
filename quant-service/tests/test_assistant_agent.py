@@ -74,7 +74,8 @@ def test_agent_converts_langgraph_messages_and_preserves_structured_metadata(mon
                     "name": "get_current_portfolio_snapshot", "args": {},
                     "id": "call-1", "type": "tool_call"}]), {})}
             yield {"type": "messages", "data": (
-                ToolMessage(content="{}", tool_call_id="call-1", artifact={
+                ToolMessage(content="{}", tool_call_id="call-1",
+                            name="get_current_portfolio_snapshot", artifact={
                     "structured_content": {"snapshotId": "snapshot-1"}}), {})}
             yield {"type": "messages", "data": (AIMessage(content="分析完成"), {})}
 
@@ -97,7 +98,10 @@ def test_agent_converts_langgraph_messages_and_preserves_structured_metadata(mon
 
     assert [event["type"] for event in events] == [
         "status", "tool_result", "status", "delta", "done"]
-    assert events[1]["metadata"] == {"snapshotId": "snapshot-1"}
+    assert events[1]["metadata"] == {
+        "snapshotId": "snapshot-1",
+        "toolName": "get_current_portfolio_snapshot",
+    }
     assert events[3]["text"] == "分析完成"
     assert captured["state"] == {"messages": [{"role": "user", "content": "分析持仓"}]}
     assert captured["stream"]["context"] == context

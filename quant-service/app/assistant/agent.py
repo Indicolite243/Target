@@ -147,8 +147,11 @@ class TargetLangChainAgent:
                             yield {"type": "delta", "text": text}
                     elif isinstance(message, ToolMessage):
                         structured = self._structured_content(message.artifact)
-                        if structured:
-                            yield {"type": "tool_result", "metadata": structured}
+                        metadata = dict(structured)
+                        if message.name:
+                            metadata["toolName"] = message.name
+                        if metadata:
+                            yield {"type": "tool_result", "metadata": metadata}
                         yield {"type": "status", "phase": "GENERATING",
                                "message": "正在结合工具结果生成回答"}
                 if not saw_answer:
