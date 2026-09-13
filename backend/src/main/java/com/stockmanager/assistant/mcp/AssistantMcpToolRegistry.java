@@ -8,6 +8,7 @@ import com.stockmanager.assistant.AssistantPortfolioSnapshotService;
 import com.stockmanager.common.exception.BusinessException;
 import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.springframework.stereotype.Component;
 
@@ -18,6 +19,10 @@ import java.util.Map;
 /** 注册 Target 投研域 MCP 工具，处理器只调用已有的用户隔离只读服务。 */
 @Component
 public class AssistantMcpToolRegistry {
+    public static final String HEADER_USER_ID = "X-Target-User-Id";
+    public static final String HEADER_CONVERSATION_ID = "X-Target-Conversation-Id";
+    public static final String HEADER_REQUEST_ID = "X-Target-Request-Id";
+    public static final String HEADER_TRACE_ID = "X-Trace-Id";
     private static final String EMPTY_SCHEMA = """
             {"type":"object","properties":{},"additionalProperties":false}
             """;
@@ -83,7 +88,7 @@ public class AssistantMcpToolRegistry {
         return McpServerFeatures.SyncToolSpecification.builder().tool(definition)
                 .callHandler((exchange, request) -> {
                     try {
-                        return handler.apply(context(request), request);
+                        return handler.apply(context(exchange, request), request);
                     } catch (BusinessException exception) {
                         return failure(exception.getMessage());
                     } catch (Exception exception) {
@@ -99,12 +104,30 @@ public class AssistantMcpToolRegistry {
         return success(value.modelJson(), metadata);
     }
 
-    private Context context(McpSchema.CallToolRequest request) {
+    private Context context(McpSyncServerExchange exchange, McpSchema.CallToolRequest request) {
+        Object headerUserId = transport(exchange, HEADER_USER_ID);
+        Object headerConversationId = transport(exchange, HEADER_CONVERSATION_ID);
+        Object headerRequestId = transport(exchange, HEADER_REQUEST_ID);
+        Object headerTraceId = transport(exchange, HEADER_TRACE_ID);
+        if (headerUserId != null || headerConversationId != null || headerRequestId != null) {
+            return new Context(requiredLong(Map.of(HEADER_USER_ID, value(headerUserId)), HEADER_USER_ID),
+                    requiredText(Map.of(HEADER_CONVERSATION_ID, value(headerConversationId)), HEADER_CONVERSATION_ID),
+                    requiredText(Map.of(HEADER_REQUEST_ID, value(headerRequestId)), HEADER_REQUEST_ID),
+                    headerTraceId == null ? "" : String.valueOf(headerTraceId));
+        }
         Map<String, Object> metadata = request.meta() == null ? Map.of() : request.meta();
         return new Context(requiredLong(metadata, McpAssistantToolGateway.META_USER_ID),
                 requiredText(metadata, McpAssistantToolGateway.META_CONVERSATION_ID),
                 requiredText(metadata, McpAssistantToolGateway.META_REQUEST_ID),
                 String.valueOf(metadata.getOrDefault(McpAssistantToolGateway.META_TRACE_ID, "")));
+    }
+
+    private Object transport(McpSyncServerExchange exchange, String key) {
+        return exchange == null || exchange.transportContext() == null ? null : exchange.transportContext().get(key);
+    }
+
+    private Object value(Object value) {
+        return value == null ? "" : value;
     }
 
     private long requiredLong(Map<String, Object> metadata, String key) {

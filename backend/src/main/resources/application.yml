@@ -96,6 +96,8 @@ app:
   market:
     quote-cache-ttl-ms: ${MARKET_QUOTE_CACHE_TTL_MS:1000}
   assistant:
+    # langchain: FastAPI create_agent + MCP；legacy: Java 内置工具循环（回滚开关）
+    engine: ${ASSISTANT_ENGINE:langchain}
     knowledge:
       storage-root: ${ASSISTANT_KNOWLEDGE_STORAGE_ROOT:../runtime/knowledge}
     mcp:

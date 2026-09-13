@@ -11,7 +11,7 @@ from time import perf_counter
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 
 from app.config import Settings, get_settings
-from app.assistant_api import router as assistant_router
+from app.assistant.api import router as assistant_router
 from app.schemas.account import AccountSyncRequest
 from app.schemas.analysis import PortfolioHistoryRequest
 from app.schemas.common import InternalResponse

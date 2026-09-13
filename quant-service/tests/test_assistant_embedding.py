@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from app.services.assistant_embedding import (
+from app.assistant.embedding import (
     AssistantEmbeddingError,
     AssistantEmbeddingSettings,
     QwenEmbeddingModel,

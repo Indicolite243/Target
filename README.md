@@ -7,11 +7,24 @@
 ```text
 Target/
 ├─ frontend/       Vue 3 + Vite 前端（保留原页面并迁移 API）
-├─ backend/        Spring Boot 主后端（Controller/Service/Mapper）
-├─ quant-service/  FastAPI 数据、QMT 和风险计算服务
+├─ backend/        Spring Boot 主后端
+│  └─ src/main/java/com/stockmanager/assistant/
+│     ├─ agent/    Java 与 LangChain Agent 之间的流式网关
+│     └─ mcp/      持仓、归因、回测、知识库 MCP 工具服务
+├─ quant-service/  FastAPI 内部服务
+│  └─ app/
+│     ├─ assistant/  投研助手：API、LangChain Agent、LLM、Embedding
+│     ├─ services/   QMT、行情、下单、回测等量化业务服务
+│     └─ schemas/    量化业务请求与响应模型
+├─ strategies/     回测策略文件
+├─ runtime/        运行时数据，不属于核心源码
+├─ scripts/        运维和辅助脚本
 ├─ docs/           架构、接口和迁移进度文档
 └─ .env.example    本地环境变量模板
 ```
+
+阅读投研 Agent 时，从 `quant-service/app/assistant/agent.py` 开始；其余量化业务代码不在
+Agent 目录中。Java 侧只需配合查看 `backend/.../assistant/agent/` 和 `assistant/mcp/`。
 
 ## 当前已经完成
 
@@ -107,10 +120,13 @@ mvn spring-boot:run
 
 健康检查：`http://127.0.0.1:8080/api/v1/health`。Swagger：`http://127.0.0.1:8080/swagger-ui.html`。
 
-投研 Agent 通过官方 Java SDK 连接同一应用内的 Streamable HTTP MCP 服务。默认地址为
+投研 Agent 默认由 FastAPI 中的 LangChain `create_agent` 编排，并通过
+`langchain-mcp-adapters` 连接同一应用内的 Streamable HTTP MCP 服务。MCP 默认地址为
 `http://127.0.0.1:8080/internal/mcp`，只接受 `X-Internal-Token`，不直接暴露给浏览器。
 启动端口变化时，将 `ASSISTANT_MCP_BASE_URL` 一并改为对应地址；生产环境必须使用独立的
-`ASSISTANT_MCP_INTERNAL_TOKEN`。
+`ASSISTANT_MCP_INTERNAL_TOKEN`。Agent 默认最多执行 3 次模型调用和 5 次工具调用，可通过
+`ASSISTANT_AGENT_MAX_MODEL_CALLS`、`ASSISTANT_AGENT_MAX_TOOL_CALLS` 调整。若需紧急回滚旧 Java
+工具循环，可设置 `ASSISTANT_ENGINE=legacy` 后重启 Spring Boot。
 
 也可直接运行 `D:\Target\start-backend.ps1`。
 

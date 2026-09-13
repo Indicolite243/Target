@@ -98,12 +98,13 @@
 
 ## 投研助手增量
 
-状态：对话、账户工具、回测、业绩归因、用户私有知识库 RAG 和 MCP 第一版已完成。
+状态：对话、账户工具、回测、业绩归因、用户私有知识库 RAG、MCP 与 LangChain Agent 改造已完成。
 
-- Spring Boot 负责 JWT 用户边界、会话和消息持久化、受控 Function Calling、持仓/归因/回测冻结快照，以及私有知识文档和证据追溯；Agent 通过官方 Java SDK 的 Streamable HTTP MCP 客户端发现和调用 5 个只读投研工具。
-- FastAPI 负责千问流式生成与百炼 `text-embedding-v4` 向量生成；浏览器不接触百炼密钥，Java-Python 之间继续使用内部令牌。
+- Spring Boot 负责 JWT 用户边界、会话和消息持久化、持仓/归因/回测冻结快照，以及私有知识文档和证据追溯；FastAPI 中的 LangChain `create_agent` 负责受控工具循环。
+- FastAPI 使用 `ChatOpenAI` 适配千问兼容接口，通过 `langchain-mcp-adapters` 自动发现和调用 5 个只读投研工具，并继续负责百炼 `text-embedding-v4` 向量生成；浏览器不接触百炼密钥。
 - 私有知识库支持 PDF、DOCX、MD、TXT，使用 Apache Tika 提取正文；切片和 1024 维向量保存在 MySQL，原文件存放于运行时私有目录。
 - 检索同时校验文档和切片的当前用户归属，采用向量相似度、轻量词法匹配与 RRF 融合；检索证据随回答冻结，支持 `[K1]` 形式引用。
 - Flyway 已执行至 V17。真实浏览器已验证上传、索引、工具调用、流式回答、文档名与引用；测试数据已清理。
-- MCP 服务端点默认 `/internal/mcp`，由独立内部令牌保护；用户、会话、请求和追踪身份由可信客户端元数据传递，不交给模型生成。
-- 当前回归基线：Spring Boot 测试包含 MCP 初始化、工具发现、工具调用及鉴权覆盖；Vue 14 项、FastAPI 41 项测试通过，Vue 生产构建通过。
+- MCP 服务端点默认 `/internal/mcp`，由独立内部令牌保护；用户、会话、请求和追踪身份由 Java 传给 Agent runtime，再由 MCP 拦截器写入可信传输头，不进入模型可生成的工具参数。
+- Agent 设置模型与工具调用次数上限，保留取消、流式输出、部分结果持久化和工具快照追溯；`ASSISTANT_ENGINE=legacy` 可回滚到原 Java 工具循环。
+- 当前回归基线：Spring Boot 全量测试 52 项、FastAPI 46 项、Vue 15 项通过；Vue 生产构建通过。

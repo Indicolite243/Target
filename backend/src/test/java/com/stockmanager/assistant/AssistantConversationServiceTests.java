@@ -1,5 +1,6 @@
 package com.stockmanager.assistant;
 
+import com.stockmanager.assistant.agent.AssistantAgentGateway;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -87,6 +88,35 @@ class AssistantConversationServiceTests {
         try {
             assertThrows(BusinessException.class, () -> service.ask(7, "id", " ", "trace"));
             verifyNoInteractions(jdbc);
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test void langChainAgentStreamsAnswerAndPersistsToolMetadata() throws Exception {
+        JdbcTemplate jdbc = preparedJdbc();
+        CountDownLatch generated = new CountDownLatch(1);
+        AssistantAgentGateway agentGateway = (messages, context, consumer, cancellation) -> {
+            assertEquals(7L, context.userId());
+            assertEquals("id", context.conversationId());
+            assertEquals("当前组合怎么样", messages.getLast().content());
+            consumer.accept(new AssistantAgentGateway.AgentEvent(
+                    "tool_result", null, null, null, java.util.Map.of("snapshotId", "snapshot-lc")));
+            consumer.accept(new AssistantAgentGateway.AgentEvent(
+                    "delta", "LangChain 分析完成。", null, null, java.util.Map.of()));
+            generated.countDown();
+        };
+        AssistantConversationService service = new AssistantConversationService(
+                jdbc, mock(AssistantModelGateway.class), mock(AssistantToolGateway.class), agentGateway, "langchain");
+        try {
+            service.ask(7, "id", "当前组合怎么样", "trace");
+            assertTrue(generated.await(2, TimeUnit.SECONDS));
+            verify(jdbc).update(eq("UPDATE ai_message SET snapshot_id=? WHERE conversation_id=? AND request_id=?"),
+                    eq("snapshot-lc"), eq("id"), anyString());
+            verify(jdbc, timeout(2000)).update(eq("UPDATE ai_message SET content=? WHERE id=? AND conversation_id=?"),
+                    eq("LangChain 分析完成。"), anyString(), eq("id"));
+            verify(jdbc, timeout(2000)).update(eq("UPDATE ai_message SET status=? WHERE id IN (?,?) AND conversation_id=?"),
+                    eq("COMPLETED"), anyString(), anyString(), eq("id"));
         } finally {
             service.shutdown();
         }

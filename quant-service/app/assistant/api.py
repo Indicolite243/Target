@@ -7,11 +7,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.services.assistant_llm import AssistantModelError, AssistantModelSettings, QwenStreamingModel
-from app.services.assistant_embedding import (
+from app.assistant.llm import AssistantModelError, AssistantModelSettings, QwenStreamingModel
+from app.assistant.embedding import (
     AssistantEmbeddingError,
     AssistantEmbeddingSettings,
     QwenEmbeddingModel,
+)
+from app.assistant.agent import (
+    AssistantAgentSettings,
+    TargetAgentContext,
+    TargetLangChainAgent,
 )
 
 router = APIRouter()
@@ -50,12 +55,38 @@ class StreamRequest(BaseModel):
         return self
 
 
+class AgentInvocation(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    user_id: int = Field(gt=0, alias="userId")
+    conversation_id: str = Field(min_length=1, max_length=64, alias="conversationId")
+    request_id: str = Field(min_length=1, max_length=64, alias="requestId")
+    trace_id: str = Field(default="", max_length=128, alias="traceId")
+
+
+class AgentStreamRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    messages: list[ModelMessage] = Field(min_length=1, max_length=80)
+    context: AgentInvocation
+
+    @model_validator(mode="after")
+    def bound_context(self):
+        if sum(len(message.content) for message in self.messages) > 120000:
+            raise ValueError("conversation context too large")
+        if self.messages[-1].role != "user":
+            raise ValueError("last message must be a user question")
+        return self
+
+
 def get_model() -> QwenStreamingModel:
     return QwenStreamingModel(AssistantModelSettings())
 
 
 def get_embedding_model() -> QwenEmbeddingModel:
     return QwenEmbeddingModel(AssistantEmbeddingSettings())
+
+
+def get_agent() -> TargetLangChainAgent:
+    return TargetLangChainAgent(AssistantModelSettings(), AssistantAgentSettings())
 
 
 class EmbeddingRequest(BaseModel):
@@ -115,6 +146,50 @@ async def assistant_stream(payload: StreamRequest, model=Depends(get_model)):
         except Exception:
             # 不向客户端传递堆栈、环境变量、请求内容或上游错误体。
             yield sse("error", {"status": "FAILED", "message": "模型服务异常，已生成内容可能不完整"})
+        finally:
+            await stream.aclose()
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no",
+    })
+
+
+@router.post("/assistant/agent/stream")
+async def assistant_agent_stream(payload: AgentStreamRequest, agent=Depends(get_agent)):
+    if not agent.model_settings.api_key.get_secret_value():
+        raise HTTPException(status_code=503, detail="千问密钥尚未配置")
+
+    context = TargetAgentContext(
+        user_id=payload.context.user_id,
+        conversation_id=payload.context.conversation_id,
+        request_id=payload.context.request_id,
+        trace_id=payload.context.trace_id,
+    )
+
+    async def events():
+        yield sse("status", {"phase": "SELECTING", "message": "LangChain Agent 正在判断所需数据"})
+        stream = agent.stream_events(
+            [message.model_dump(exclude_none=True) for message in payload.messages], context)
+        try:
+            async with asyncio.timeout(300):
+                async for event in stream:
+                    event_type = event["type"]
+                    if event_type == "delta":
+                        yield sse("delta", {"text": event["text"]})
+                    elif event_type == "status":
+                        yield sse("status", {"phase": event["phase"], "message": event["message"]})
+                    elif event_type == "tool_result":
+                        yield sse("tool_result", {"metadata": event["metadata"]})
+                    elif event_type == "done":
+                        yield sse("done", {"status": "COMPLETED"})
+        except AssistantModelError as exc:
+            yield sse("error", {"status": "FAILED", "message": str(exc)})
+        except TimeoutError:
+            yield sse("error", {"status": "FAILED", "message": "Agent 执行超过时间限制，已生成内容可能不完整"})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            yield sse("error", {"status": "FAILED", "message": "Agent 服务异常，已生成内容可能不完整"})
         finally:
             await stream.aclose()
 

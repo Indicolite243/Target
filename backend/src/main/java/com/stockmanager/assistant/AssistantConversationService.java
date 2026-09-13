@@ -4,9 +4,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import com.stockmanager.common.exception.BusinessException;
 import org.springframework.http.HttpStatus;
+import com.stockmanager.assistant.agent.AssistantAgentGateway;
+import com.stockmanager.assistant.agent.LangChainAssistantAgentGateway;
 import jakarta.annotation.PreDestroy;
 import jakarta.annotation.PostConstruct;
 import java.io.Closeable;
@@ -52,20 +55,30 @@ public class AssistantConversationService {
     private final JdbcTemplate jdbc;
     private final AssistantModelGateway modelGateway;
     private final AssistantToolGateway toolGateway;
+    private final AssistantAgentGateway agentGateway;
+    private final boolean langChainEnabled;
     private final ExecutorService generationExecutor = Executors.newVirtualThreadPerTaskExecutor();
     private final ConcurrentHashMap<String, ActiveGeneration> active = new ConcurrentHashMap<>();
 
     @Autowired
     public AssistantConversationService(JdbcTemplate jdbc, AssistantModelGateway modelGateway,
-                                        AssistantToolGateway toolGateway) {
+                                        AssistantToolGateway toolGateway,
+                                        AssistantAgentGateway agentGateway,
+                                        @Value("${app.assistant.engine:langchain}") String engine) {
         this.jdbc = jdbc;
         this.modelGateway = modelGateway;
         this.toolGateway = toolGateway;
+        this.agentGateway = agentGateway;
+        this.langChainEnabled = "langchain".equalsIgnoreCase(engine);
     }
     AssistantConversationService(JdbcTemplate jdbc, AssistantModelGateway modelGateway) {
-        this(jdbc, modelGateway, NO_TOOLS);
+        this(jdbc, modelGateway, NO_TOOLS, null, "legacy");
     }
-    AssistantConversationService(JdbcTemplate jdbc) { this(jdbc, null, NO_TOOLS); }
+    AssistantConversationService(JdbcTemplate jdbc, AssistantModelGateway modelGateway,
+                                 AssistantToolGateway toolGateway) {
+        this(jdbc, modelGateway, toolGateway, null, "legacy");
+    }
+    AssistantConversationService(JdbcTemplate jdbc) { this(jdbc, null, NO_TOOLS, null, "legacy"); }
     public record Conversation(String id, String title, LocalDateTime createdAt, LocalDateTime updatedAt) {}
     public record Message(String id, String role, String content, String status, LocalDateTime createdAt) {}
 
@@ -123,7 +136,7 @@ public class AssistantConversationService {
         if (question == null || question.isBlank() || question.strip().length() > 8000)
             throw new BusinessException(400101, "问题必须为1至8000个字符", HttpStatus.BAD_REQUEST);
         requireOwner(userId, id);
-        if (modelGateway == null)
+        if ((langChainEnabled && agentGateway == null) || (!langChainEnabled && modelGateway == null))
             throw new BusinessException(503100, "模型服务尚未配置", HttpStatus.SERVICE_UNAVAILABLE);
 
         String requestId = UUID.randomUUID().toString();
@@ -196,6 +209,41 @@ public class AssistantConversationService {
     }
 
     private void generate(ActiveGeneration generation, List<AssistantModelGateway.ModelMessage> context, String traceId) {
+        if (langChainEnabled) {
+            generateWithLangChain(generation, context);
+        } else {
+            generateLegacy(generation, context, traceId);
+        }
+    }
+
+    private void generateWithLangChain(ActiveGeneration generation,
+                                       List<AssistantModelGateway.ModelMessage> context) {
+        try {
+            agentGateway.stream(context, new AssistantAgentGateway.InvocationContext(
+                            generation.userId, generation.conversationId, generation.requestId, generation.traceId),
+                    event -> acceptAgentEvent(generation, event), generation);
+            if (generation.content.isEmpty())
+                throw new LangChainAssistantAgentGateway.AssistantAgentException("模型没有返回回答");
+            if (generation.terminal.compareAndSet(false, true)) {
+                if (finishSafely(generation, "COMPLETED"))
+                    emit(generation.emitter, "done", Map.of("status", "COMPLETED"));
+                else
+                    emit(generation.emitter, "error", Map.of("status", "FAILED", "message", "回答已生成，但保存失败"));
+                generation.emitter.complete();
+            }
+        } catch (RuntimeException exception) {
+            if (generation.terminal.compareAndSet(false, true)) {
+                finishSafely(generation, "FAILED");
+                emit(generation.emitter, "error", Map.of("status", "FAILED", "message", safeMessage(exception)));
+                generation.emitter.complete();
+            }
+        } finally {
+            active.remove(generation.conversationId, generation);
+        }
+    }
+
+    private void generateLegacy(ActiveGeneration generation, List<AssistantModelGateway.ModelMessage> context,
+                                String traceId) {
         try {
             emit(generation.emitter, "status", Map.of("phase", "SELECTING", "message", "正在判断所需数据"));
             StringBuffer directAnswer = new StringBuffer();
@@ -242,26 +290,7 @@ public class AssistantConversationService {
             AssistantToolGateway.ToolResult result = toolGateway.call(call,
                     new AssistantToolGateway.InvocationContext(generation.userId, generation.conversationId,
                             generation.requestId, generation.traceId));
-            String snapshotId = textMetadata(result.metadata(), "snapshotId");
-            if (snapshotId != null) {
-                generation.snapshotId = snapshotId;
-                jdbc.update("UPDATE ai_message SET snapshot_id=? WHERE conversation_id=? AND request_id=?",
-                        snapshotId, generation.conversationId, generation.requestId);
-            }
-            String attributionSnapshotId = textMetadata(result.metadata(), "attributionSnapshotId");
-            if (attributionSnapshotId != null)
-                jdbc.update("UPDATE ai_message SET attribution_snapshot_id=? WHERE conversation_id=? AND request_id=?",
-                        attributionSnapshotId, generation.conversationId, generation.requestId);
-            String knowledgeSnapshotId = textMetadata(result.metadata(), "knowledgeSnapshotId");
-            if (knowledgeSnapshotId != null)
-                jdbc.update("UPDATE ai_message SET knowledge_snapshot_id=? WHERE conversation_id=? AND request_id=?",
-                        knowledgeSnapshotId, generation.conversationId, generation.requestId);
-            Long backtestTaskId = longMetadata(result.metadata(), "backtestTaskId");
-            if (backtestTaskId != null) {
-                generation.backtestTaskId = backtestTaskId;
-                jdbc.update("UPDATE ai_message SET backtest_task_id=? WHERE conversation_id=? AND request_id=?",
-                        backtestTaskId, generation.conversationId, generation.requestId);
-            }
+            recordToolMetadata(generation, result.metadata());
             return result.content();
         } catch (QwenAssistantModelGateway.AssistantGatewayException exception) {
             throw exception;
@@ -269,6 +298,29 @@ public class AssistantConversationService {
             throw new QwenAssistantModelGateway.AssistantGatewayException(
                     exception.getMessage() == null || exception.getMessage().isBlank()
                             ? "MCP 工具服务暂时不可用" : exception.getMessage());
+        }
+    }
+
+    private void recordToolMetadata(ActiveGeneration generation, Map<String, Object> metadata) {
+        String snapshotId = textMetadata(metadata, "snapshotId");
+        if (snapshotId != null) {
+            generation.snapshotId = snapshotId;
+            jdbc.update("UPDATE ai_message SET snapshot_id=? WHERE conversation_id=? AND request_id=?",
+                    snapshotId, generation.conversationId, generation.requestId);
+        }
+        String attributionSnapshotId = textMetadata(metadata, "attributionSnapshotId");
+        if (attributionSnapshotId != null)
+            jdbc.update("UPDATE ai_message SET attribution_snapshot_id=? WHERE conversation_id=? AND request_id=?",
+                    attributionSnapshotId, generation.conversationId, generation.requestId);
+        String knowledgeSnapshotId = textMetadata(metadata, "knowledgeSnapshotId");
+        if (knowledgeSnapshotId != null)
+            jdbc.update("UPDATE ai_message SET knowledge_snapshot_id=? WHERE conversation_id=? AND request_id=?",
+                    knowledgeSnapshotId, generation.conversationId, generation.requestId);
+        Long backtestTaskId = longMetadata(metadata, "backtestTaskId");
+        if (backtestTaskId != null) {
+            generation.backtestTaskId = backtestTaskId;
+            jdbc.update("UPDATE ai_message SET backtest_task_id=? WHERE conversation_id=? AND request_id=?",
+                    backtestTaskId, generation.conversationId, generation.requestId);
         }
     }
 
@@ -297,6 +349,19 @@ public class AssistantConversationService {
         }
     }
 
+    private void acceptAgentEvent(ActiveGeneration generation, AssistantAgentGateway.AgentEvent event) {
+        if (generation.cancelled.get()) return;
+        if ("delta".equals(event.type()) && event.text() != null) {
+            generation.content.append(event.text());
+            if (generation.content.length() - generation.persistedLength >= 512) persistPartial(generation);
+            emit(generation.emitter, "delta", Map.of("text", event.text()));
+        } else if ("status".equals(event.type())) {
+            emit(generation.emitter, "status", Map.of("phase", event.phase(), "message", event.message()));
+        } else if ("tool_result".equals(event.type()) && event.metadata() != null) {
+            recordToolMetadata(generation, event.metadata());
+        }
+    }
+
     private void persistPartial(ActiveGeneration generation) {
         String content = generation.content.toString();
         jdbc.update("UPDATE ai_message SET content=? WHERE id=? AND conversation_id=?", content,
@@ -319,6 +384,8 @@ public class AssistantConversationService {
 
     private String safeMessage(RuntimeException exception) {
         if (exception instanceof QwenAssistantModelGateway.AssistantGatewayException && exception.getMessage() != null)
+            return exception.getMessage();
+        if (exception instanceof LangChainAssistantAgentGateway.AssistantAgentException && exception.getMessage() != null)
             return exception.getMessage();
         return "回答生成失败，已生成内容可能不完整";
     }

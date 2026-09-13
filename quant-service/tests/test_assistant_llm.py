@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from app.services.assistant_llm import AssistantModelSettings, AssistantModelError, QwenStreamingModel
+from app.assistant.llm import AssistantModelSettings, AssistantModelError, QwenStreamingModel
 
 
 def model(handler):

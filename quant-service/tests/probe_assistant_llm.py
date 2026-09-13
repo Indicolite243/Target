@@ -7,7 +7,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.services.assistant_llm import AssistantModelError, AssistantModelSettings, QwenStreamingModel
+from app.assistant.llm import AssistantModelError, AssistantModelSettings, QwenStreamingModel
 
 
 async def probe(credentials_file: str, through_api: bool = False) -> int:
@@ -16,7 +16,7 @@ async def probe(credentials_file: str, through_api: bool = False) -> int:
     if through_api:
         import httpx
         from app.main import app, authorize
-        from app.assistant_api import get_model
+        from app.assistant.api import get_model
         # 仅本进程 ASGI 验证；不启动端口、不连接 QMT、不影响运行中的服务。
         app.dependency_overrides[authorize] = lambda: None
         app.dependency_overrides[get_model] = lambda: QwenStreamingModel(settings)

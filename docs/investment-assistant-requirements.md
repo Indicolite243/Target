@@ -11,9 +11,9 @@
 
 用户已学习 Java/Spring Boot、MySQL、Redis、RabbitMQ、Python、RAG、LangChain 基础、HelloAgents、Function Calling、MCP 与上下文工程。已有 Target 的 Vue 3 + Pinia + ECharts、Spring Boot 3/Java 21 和 FastAPI；已有黑马点评 RabbitMQ 可靠消息项目。
 
-复用现有 Vue、Spring Security/JWT、MyBatis-Plus、MySQL/Flyway、Redis 和 FastAPI。Java 管理身份、账户归属、会话、冻结快照、受控工具执行及流式网关；Python 独立 AI 模块负责千问调用和 Function Calling 协议适配，后续再承载检索与分析计算。保持 QMT 采集和 AI 长耗时处理隔离。
+复用现有 Vue、Spring Security/JWT、MyBatis-Plus、MySQL/Flyway、Redis 和 FastAPI。Java 管理身份、账户归属、会话、冻结快照、受控工具执行及流式网关；Python AI 模块使用 LangChain 负责千问调用、Agent 编排和 MCP 客户端适配。保持 QMT 采集和 AI 长耗时处理隔离。
 
-借鉴 MewHelp 截图中的混合 RAG、RRF、重排、Function Calling、上下文管理与可观测性。第一阶段不引入 LangGraph、多 Agent、Milvus 集群、RoBERTa 微调或新消息队列。以受控工具调用循环完成任务，RAG 使用可替换的向量检索适配器与 BM25，后续按数据规模选择存储。适合跨客户端复用的只读投研能力使用官方 Java SDK 和 Streamable HTTP MCP；会话 UI 与内部 CRUD 不为了形式重复包装成 MCP。
+借鉴 MewHelp 截图中的混合 RAG、RRF、重排、Function Calling、上下文管理与可观测性。当前使用 LangChain `create_agent`（底层 LangGraph runtime）完成单 Agent 受控工具循环，不引入多 Agent、Milvus 集群、RoBERTa 微调或新消息队列。RAG 使用可替换的向量检索适配器与 BM25，后续按数据规模选择存储。适合跨客户端复用的只读投研能力使用 Streamable HTTP MCP；会话 UI 与内部 CRUD 不为了形式重复包装成 MCP。
 
 ## 产品与交互
 
@@ -77,7 +77,7 @@
 
 ### 千问适配进度（2026-09-11）
 
-- 已实现千问流式适配器和 `/internal/v1/assistant/stream`，后者沿用 Java/Python 内部令牌鉴权，不直接对浏览器开放。
+- 已实现基于 LangChain `ChatOpenAI` 的千问流式适配器；`/internal/v1/assistant/agent/stream` 承载 `create_agent` 主链路，原 `/internal/v1/assistant/stream` 保留给 legacy 回滚，两个端点均沿用 Java/Python 内部令牌鉴权，不直接对浏览器开放。
 - 协议事件为 status、delta、tool_calls、done 或 error；失败保留已输出片段但不发送成功事件。过滤 reasoning_content，限制消息长度、总上下文和生成时间，关闭流时释放上游连接。
 - 真实 qwen3.7-plus 调用已通过；凭证从学习项目本地配置只读引用，没有复制密钥。持仓问答只发送分析所需的账户汇总、证券持仓和确定性集中度指标，不发送资金账号、账户名称、用户身份或系统内部主键。
 - Target 支持直接配置 DASHSCOPE_API_KEY，也支持用本机忽略文件只引用学习项目中的既有凭证；仓库不保存密钥。
@@ -95,7 +95,7 @@
 - 已实现用户私有知识库：页面管理 PDF、DOCX、MD、TXT 文档；Java 负责格式/大小校验、Tika 正文提取、切片、MySQL 元数据和用户归属；FastAPI 使用百炼 `text-embedding-v4` 生成 1024 维向量。检索按当前用户同时约束文档与切片，以向量相似度和轻量词法匹配进行 RRF 融合，最多向模型提供 6 条带 `[K编号]` 的证据。
 - 每次知识工具调用都把查询、文档名、切片正文、分数与 Embedding 模型冻结为 `KNOWLEDGE` 快照，并由回答消息保存快照外键；删除原文档不会改写已有回答的证据链。
 - 真实浏览器验证：修正公共 Axios JSON 请求头对 multipart 上传的干扰后，测试 Markdown 文档成功进入 `READY`；千问通过 `search_private_knowledge_base` 准确解释文档中的专有“北极星规则”和“蓝港检查”，并返回文档名及 `[K1]` 引用。测试会话、文档、切片、快照和存储文件随后全部清理。
-- 已接入官方 MCP Java SDK 1.1.1：应用内提供受内部令牌保护的 Streamable HTTP MCP Server，Agent 启动工具循环时通过 MCP `tools/list` 自动发现工具、通过 `tools/call` 调用。当前开放持仓快照、业绩归因、最近回测、按需策略源码和私有知识检索 5 个只读工具。
-- 用户 ID、会话 ID、请求 ID 与追踪 ID 由可信 Java Agent 作为 MCP 请求元数据注入，不出现在提供给模型的工具参数中；服务端继续执行用户归属校验和会话快照冻结。
+- Java 端继续使用官方 MCP Java SDK 1.1.1 提供受内部令牌保护的 Streamable HTTP MCP Server；Python LangChain Agent 通过 `langchain-mcp-adapters` 的 `tools/list` 自动发现工具、通过 `tools/call` 调用。当前开放持仓快照、业绩归因、最近回测、按需策略源码和私有知识检索 5 个只读工具。
+- 用户 ID、会话 ID、请求 ID 与追踪 ID 由 Java 网关传给 LangChain runtime，MCP 工具拦截器再写入可信传输头，不出现在提供给模型的工具参数中；服务端继续执行用户归属校验和会话快照冻结。
 - MCP 端点默认为 `/internal/mcp`，不接受浏览器 JWT，使用独立 `X-Internal-Token` 边界；端点、地址、令牌与超时均可通过环境变量配置。
-- 本阶段回归验证：Spring Boot 测试（含真实 Streamable HTTP MCP 初始化、工具发现和工具调用）、Vue 14 项、FastAPI 41 项测试通过，Vue 生产构建通过。
+- LangChain 改造回归验证：Spring Boot 全量 52 项、FastAPI 46 项、Vue 15 项测试通过；包含真实 Streamable HTTP MCP 初始化、工具发现和工具调用，以及 Agent 流、可信传输上下文和落库追溯覆盖；Vue 生产构建通过。

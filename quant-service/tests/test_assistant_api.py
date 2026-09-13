@@ -5,8 +5,9 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.config import Settings, get_settings
-from app.assistant_api import get_model, assistant_stream, StreamRequest
-from app.services.assistant_llm import AssistantModelSettings, AssistantModelError
+from app.assistant.api import get_agent, get_model, assistant_stream, StreamRequest
+from app.assistant.agent import TargetAgentContext
+from app.assistant.llm import AssistantModelSettings, AssistantModelError
 
 
 class FakeModel:
@@ -21,6 +22,27 @@ class FakeModel:
             yield {"type": "delta", "text": "第一行\n第二行"}
             if self.fail:
                 raise AssistantModelError("模型连接提前结束，回答可能不完整")
+            yield {"type": "done"}
+        finally:
+            self.closed = True
+
+
+class FakeAgent:
+    def __init__(self, fail=False):
+        self.model_settings = AssistantModelSettings(_env_file=None, DASHSCOPE_API_KEY="test-only")
+        self.fail = fail
+        self.closed = False
+        self.context = None
+
+    async def stream_events(self, messages, context):
+        try:
+            self.context = context
+            assert messages[-1]["content"] == "分析持仓"
+            yield {"type": "status", "phase": "READING_DATA", "message": "正在读取"}
+            yield {"type": "tool_result", "metadata": {"snapshotId": "snapshot-1"}}
+            yield {"type": "delta", "text": "组合较集中"}
+            if self.fail:
+                raise AssistantModelError("Agent 执行失败")
             yield {"type": "done"}
         finally:
             self.closed = True
@@ -113,3 +135,42 @@ def test_cancel_propagates_and_closes_model_stream():
         assert model.closed
 
     asyncio.run(run())
+
+
+def test_agent_stream_forwards_trusted_context_and_tool_metadata(client):
+    agent = FakeAgent()
+    app.dependency_overrides[get_agent] = lambda: agent
+    response = client.post(
+        "/internal/v1/assistant/agent/stream",
+        headers={"X-Internal-Token": "test-token"},
+        json={
+            "messages": [{"role": "system", "content": "只读"},
+                         {"role": "user", "content": "分析持仓"}],
+            "context": {"userId": 7, "conversationId": "conversation-1",
+                        "requestId": "request-1", "traceId": "trace-1"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.text.index("event: status") < response.text.index("event: tool_result")
+    assert response.text.index("event: tool_result") < response.text.index("event: delta")
+    assert '"snapshotId": "snapshot-1"' in response.text
+    assert "event: done" in response.text
+    assert agent.context == TargetAgentContext(7, "conversation-1", "request-1", "trace-1")
+    assert agent.closed
+
+
+def test_agent_stream_failure_never_emits_done(client):
+    agent = FakeAgent(fail=True)
+    app.dependency_overrides[get_agent] = lambda: agent
+    response = client.post(
+        "/internal/v1/assistant/agent/stream",
+        headers={"X-Internal-Token": "test-token"},
+        json={"messages": [{"role": "user", "content": "分析持仓"}],
+              "context": {"userId": 7, "conversationId": "conversation-1",
+                          "requestId": "request-1", "traceId": "trace-1"}},
+    )
+    assert "event: delta" in response.text
+    assert "event: error" in response.text
+    assert "event: done" not in response.text
+    assert agent.closed
